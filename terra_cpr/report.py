@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .models import ScanRow
+from .scanner import ScannerConfig
 
 
 def _json_default(value: Any) -> Any:
@@ -20,7 +21,9 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"cannot serialise {type(value).__name__}")
 
 
-def scan_snapshot(as_of: datetime, rows: Sequence[ScanRow]) -> dict[str, Any]:
+def scan_snapshot(
+    as_of: datetime, rows: Sequence[ScanRow], config: ScannerConfig = ScannerConfig()
+) -> dict[str, Any]:
     payload_rows = []
     for row in rows:
         payload = asdict(row)
@@ -30,7 +33,18 @@ def scan_snapshot(as_of: datetime, rows: Sequence[ScanRow]) -> dict[str, Any]:
             cpr["top"] = max(cpr["bc"], cpr["tc"])
             cpr["width"] = cpr["top"] - cpr["bottom"]
         payload_rows.append(payload)
-    return {"schema_version": 1, "as_of": as_of.isoformat(), "rows": payload_rows}
+    # The thresholds travel with the labels they produced. A snapshot that records
+    # WATCH without recording the rule that made it WATCH cannot be audited later,
+    # and a reader has no way to draw the gate it missed.
+    return {
+        "schema_version": 2,
+        "as_of": as_of.isoformat(),
+        "gates": {
+            "candidate_rs_score": config.candidate_rs_score,
+            "candidate_persistence": config.candidate_persistence,
+        },
+        "rows": payload_rows,
+    }
 
 
 def write_json_atomic(path: Path, payload: Any) -> None:

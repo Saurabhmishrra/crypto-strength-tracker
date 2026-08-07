@@ -17,6 +17,7 @@ The immediate objective is to answer a narrower question honestly: *do persisten
 - Multi-horizon, beta-adjusted relative strength versus BTC with residual volatility normalisation, beta quality, persistence, and acceleration.
 - Cross-sectional ranking and explainable CPR + RS candidate labels.
 - Fixture-driven scanner CLI that writes an atomic JSON snapshot and lightweight static HTML report.
+- A read-only live loop over public Hyperliquid data, and a local research cockpit that draws the structure instead of naming it.
 - An event-study / chronological split metrics module for testing candidate rules without silently using future data.
 
 ## Quick start
@@ -29,15 +30,35 @@ python -m terra_cpr.cli demo --output output
 
 The demo is deliberately synthetic. It validates plumbing only; it conveys no market result.
 
-## Local scanner dashboard
-
-After generating a snapshot, start the read-only local dashboard:
+## Live scanning and the local cockpit
 
 ```bash
-python3 -m terra_cpr.cli serve --output output
+python3 -m terra_cpr.cli serve --output output --live --universe 60
 ```
 
-Open `http://127.0.0.1:8765`. It shows the active candidate queue, strongest and weakest RS ranks, a filterable market map, per-asset calculation detail, and candidate activation/change/clear history. The server has only read-only `GET` routes and deliberately binds to loopback. See [`DASHBOARD.md`](DASHBOARD.md) for precise signal semantics.
+Open `http://127.0.0.1:8765`. See [`DASHBOARD.md`](DASHBOARD.md) for the signal semantics
+and what each visual encodes.
+
+`--live` adds a **two-tier public-data loop**. Relative strength cannot change until an
+hourly bar closes, but the structure leg of the rule moves continuously and is what flips
+`WATCH` into a candidate — so the tiers are split:
+
+- **every 20s** — one `allMids` request refreshes prices, and the panel is rescanned from
+  cached bars.
+- **just after each hourly close** — only the new bars are fetched per symbol and merged.
+
+Both tiers call the same `scan_assets`, so they cannot disagree about strategy logic —
+only about how fresh their inputs are. A cold start for 60 perps takes roughly 30 seconds.
+
+Run the loop without a dashboard using `terra-cpr live`, or omit `--live` from `serve` to
+read whatever a previous scan wrote and touch the network never.
+
+The loop is public-data only: it selects a universe from `metaAndAssetCtxs` and reads
+candles. There is no private endpoint, no signing code, and no order path. Note that the
+public `/info` endpoint sheds load by answering HTTP 200 with an **empty array** rather
+than a 429, so an empty candle window is treated as retryable, never as "this market has
+no data" — reading it the other way would quietly shrink the panel and corrupt every
+cross-sectional rank computed from it.
 
 ## Data contract
 

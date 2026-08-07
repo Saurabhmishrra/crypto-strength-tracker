@@ -326,6 +326,42 @@ A live smoke run is performed manually against the public endpoint and its resul
 reported honestly — including the observed universe size and any assets that failed
 quality gates.
 
+## Implementation notes — where this design was wrong
+
+Recorded rather than quietly edited, because the reasoning matters more than the plan.
+
+1. **The snapshot schema did change, to version 2.** §2.9 claimed no change was needed.
+   It was wrong: the dashboard must draw the gate thresholds, and those live in
+   `ScannerConfig`, not in the snapshot. Hardcoding 3.5 and 0.40 in the page would have
+   silently drawn the wrong gates under any custom configuration. `scan_snapshot` now
+   records a `gates` block, so the rule that produced a label travels with it — which is
+   also better research hygiene than the original design.
+2. **The micro-ladder became a horizontal track.** §2.2 put an upright ladder in a table
+   row. Measured against real data that was unreadable: a typical CPR band is ~0.15 ATR,
+   which over a ±2.5 ATR window in a 34px row renders as a 1.2px hairline, identical for
+   every asset. A table row is landscape; laying the same information on its side gives
+   112px of resolution instead of 34 and matches the tracks beside it. The upright ladder
+   survives in the drawer, where it has the height to earn its geometry.
+3. **The drawer ladder fits its levels instead of centring on price.** Pivots sit
+   asymmetrically around price, and centring spent about a third of the canvas on empty
+   space above R3. The scale stays linear, so nothing is distorted.
+4. **The detail view states all three gates explicitly.** Not in the original design.
+   `assess_setup` only records a blocker for the structure leg, so an asset held back
+   purely by persistence arrives with an empty `blockers` list and no visible explanation
+   — which is the common case, since persistence binds far more often than the other two.
+
+## Observations about the strategy, not changed
+
+- **The pivot leg of the candidate rule is mathematically redundant.** `TC = 2P - BC`
+  makes P the exact midpoint of the CPR band, so `price > TC` already implies
+  `price > pivot`, and symmetrically below BC. Verified algebraically and against all 39
+  rows of a live scan. `scanner.py` is untouched; the redundancy is harmless, and it is
+  why the cross-section's y-axis can express the whole structure gate on one dimension.
+- **`alignment_ratio` conflates "newly listed" with "stale feed."** A recent listing has
+  genuinely fewer aligned bars and trips `stale_or_misaligned` at the 0.95 threshold. The
+  dashboard surfaces the flag as published; separating the two causes would be an engine
+  change and belongs to its own decision.
+
 ## Open risks
 
 - Hyperliquid response field names are unverified until implementation; universe

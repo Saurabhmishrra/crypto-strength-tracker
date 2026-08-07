@@ -119,6 +119,16 @@ class HyperliquidPublicData:
             raise RuntimeError("unexpected allMids response")
         return {symbol: float(price) for symbol, price in rows.items()}
 
+    def fetch_meta_and_contexts(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Return perp metadata and its positionally aligned market contexts."""
+        payload = self._post({"type": "metaAndAssetCtxs"})
+        if not isinstance(payload, list) or len(payload) != 2:
+            raise RuntimeError("unexpected metaAndAssetCtxs response shape")
+        meta, contexts = payload
+        if not isinstance(meta, dict) or not isinstance(contexts, list):
+            raise RuntimeError("metaAndAssetCtxs did not return (meta, contexts)")
+        return meta, contexts
+
 
 def synthetic_demo_assets() -> tuple[datetime, int, dict[str, AssetInput]]:
     """Deterministic synthetic panel for a plumbing demonstration, never research."""

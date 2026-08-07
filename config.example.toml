@@ -19,3 +19,12 @@ long_horizon_bars = 168
 [decision]
 candidate_rs_score = 3.5
 candidate_persistence = 0.40
+
+# Applies to `live` and `serve --live` only. Public market data, read-only.
+[live]
+universe_size = 60          # perps ranked by 24h notional volume; benchmark always kept
+fast_interval_seconds = 20  # mid-price refresh: moves the CPR/pivot structure leg
+settle_seconds = 30         # wait after a bar close before topping candles up
+hourly_window = 720         # bars cached per symbol; matches relative_strength.beta_window
+daily_window = 140          # days cached; covers width_history plus atr_period
+min_gap_seconds = 0.12      # minimum gap between candle requests

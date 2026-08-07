@@ -10,9 +10,12 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # Python 3.9–3.10: this project needs only a tiny TOML subset.
     tomllib = None
 
+from .live import LiveConfig
 from .market_structure import MarketStructureConfig
 from .relative_strength import RSConfig
 from .scanner import ScannerConfig
+
+DEFAULT_INTERVAL_SECONDS = 3600
 
 
 def _parse_scalar(value: str) -> Any:
@@ -88,3 +91,15 @@ def load_scanner_config(path: Path, fallback_interval_seconds: int) -> ScannerCo
             f"config interval_seconds={config.interval_seconds} does not match fixture interval_seconds={fallback_interval_seconds}"
         )
     return config
+
+
+def load_live_configs(path: Path) -> tuple[ScannerConfig, LiveConfig]:
+    """Load both configs for live mode, where the file itself sets the interval.
+
+    A live run has no fixture to agree with, so the bar interval is taken from
+    the configuration rather than cross-checked against one.
+    """
+    raw = _read_toml(path.read_text())
+    interval = int(raw.get("scanner", {}).get("interval_seconds", DEFAULT_INTERVAL_SECONDS))
+    live_values = _known_values(raw.get("live", {}), LiveConfig)
+    return load_scanner_config(path, interval), LiveConfig(**live_values)
