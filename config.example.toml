@@ -1,0 +1,21 @@
+[scanner]
+benchmark = "BTC"
+interval_seconds = 3600
+
+[market_structure]
+atr_period = 14
+realized_vol_period = 20
+width_history = 120
+
+[relative_strength]
+beta_window = 720
+min_beta_points = 240
+persistence_window = 24
+min_alignment_ratio = 0.95
+short_horizon_bars = 4
+medium_horizon_bars = 24
+long_horizon_bars = 168
+
+[decision]
+candidate_rs_score = 3.5
+candidate_persistence = 0.40

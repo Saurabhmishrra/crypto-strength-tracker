@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terra-cpr"
+version = "0.1.0"
+description = "Research-first CPR and relative-strength market scanner"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+terra-cpr = "terra_cpr.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["terra_cpr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
