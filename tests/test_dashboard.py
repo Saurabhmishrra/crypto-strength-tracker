@@ -163,6 +163,24 @@ class SafetyBoundary(unittest.TestCase):
             with self.subTest(word=word):
                 self.assertIsNone(re.search(rf"\b{word}\b", html))
 
+    def test_a_failed_fetch_cannot_leave_the_page_looking_healthy(self):
+        """A rejected fetch once left the header painting its start-up state:
+        a calm grey 'off' while the loop was failing behind it. 'Cannot reach
+        the server' and 'no loop configured' must not render the same."""
+        html = dashboard_html()
+        refresh = html[html.index("async function refresh()"):]
+        refresh = refresh[:refresh.index("\n$(")]
+        self.assertIn("try {", refresh)
+        self.assertIn("catch", refresh)
+        self.assertIn("reachable = false", refresh)
+        self.assertIn("unreachable", html)
+
+    def test_a_loop_fault_is_stated_in_words_not_only_a_tooltip(self):
+        html = dashboard_html()
+        self.assertIn('id="fault"', html)
+        self.assertIn("consecutive_failures", html)
+        self.assertIn("last_error", html)
+
     def test_the_page_only_ever_issues_get_requests(self):
         html = dashboard_html()
         self.assertNotIn("XMLHttpRequest", html)

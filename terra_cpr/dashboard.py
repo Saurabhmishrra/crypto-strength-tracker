@@ -70,7 +70,13 @@ main{max-width:1560px;margin:0 auto;padding:0 18px 72px}
 .dot.live{background:var(--long);box-shadow:0 0 0 3px rgba(69,192,138,.16)}
 .dot.failing{background:var(--short);box-shadow:0 0 0 3px rgba(242,97,92,.16)}
 .dot.off{background:var(--faint)}
+.dot.unreachable{background:var(--short);box-shadow:0 0 0 3px rgba(242,97,92,.16)}
 .rail .warn{color:var(--blocked)}
+.fault{
+  width:100%;background:#2A1416;border-top:1px solid var(--short);
+  color:#FFC9C6;font-size:11.5px;padding:9px 18px;letter-spacing:.01em;
+}
+body.degraded .fault{filter:none}
 
 /* ---- panels ---- */
 .board{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(300px,1fr);gap:14px;margin-bottom:14px}
@@ -166,7 +172,7 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
   <div class="stat"><u>Candidates</u><b id="cands">—</b></div>
   <div class="stat"><u>Quality flags</u><b id="flags">—</b></div>
   <div class="stat"><u>Next candles</u><b id="nextRefresh">—</b></div>
-</div></header>
+</div><div class="fault" id="fault" role="alert" hidden></div></header>
 
 <main>
   <section class="board">
@@ -228,6 +234,7 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
 <script>
 const $ = id => document.getElementById(id);
 let snap = null, status = null, events = [], filter = 'ALL', sort = 'score', dir = -1, selected = null;
+let reachable = true, unreachableWhy = '';
 
 /* ---------- formatting ---------- */
 const esc = v => { const d = document.createElement('div'); d.textContent = v == null ? '' : v; return d.innerHTML; };
@@ -618,9 +625,18 @@ function close(){
 
 /* ---------- health ---------- */
 function renderHealth(){
-  const state = status ? (status.loop || 'off') : 'off';
+  const state = !reachable ? 'unreachable' : status ? (status.loop || 'off') : 'off';
   $('loopDot').className = 'dot ' + state;
-  $('loopText').textContent = state === 'live' ? 'live' : state === 'failing' ? 'failing' : 'off';
+  $('loopText').textContent = state;
+  /* Whatever is wrong gets said in words, at full width. A fault buried in a
+     tooltip is a fault nobody reads. */
+  const fault = !reachable
+    ? 'Cannot reach the scanner at ' + location.host + '. ' + esc(unreachableWhy) + ' &mdash; the server is probably not running.'
+    : state === 'failing'
+      ? 'The refresh loop has failed ' + status.consecutive_failures + ' times in a row. ' + esc(status.last_error || '')
+      : '';
+  $('fault').innerHTML = fault;
+  $('fault').hidden = !fault;
   $('age').textContent = snap ? ago(snap.as_of) : '—';
   $('count').textContent = snap ? rows().length : '—';
   const c = rows().filter(r => r.setup.label.endsWith('CANDIDATE')).length;
@@ -631,8 +647,7 @@ function renderHealth(){
   /* An old snapshot presented as current is worse than no snapshot: desaturate
      the whole surface so staleness cannot be mistaken for a quiet market. */
   const ageSec = snap ? (Date.now() - new Date(snap.as_of).getTime()) / 1000 : Infinity;
-  document.body.classList.toggle('degraded', state === 'failing' || ageSec > 5400);
-  if (status && status.last_error) $('loopText').title = status.last_error;
+  document.body.classList.toggle('degraded', state === 'failing' || state === 'unreachable' || ageSec > 5400);
 }
 
 function render(){
@@ -643,16 +658,25 @@ function render(){
 
 async function refresh(){
   const get = async url => { const r = await fetch(url); return r.ok ? r.json() : null; };
-  const [s, h, st] = await Promise.all([get('/api/snapshot'), get('/api/signals?limit=60'), get('/api/status')]);
-  if (s){
-    snap = s;
-    if (s.gates){
-      RS_GATE = s.gates.candidate_rs_score;
-      P_GATE = s.gates.candidate_persistence;
+  try {
+    const [s, h, st] = await Promise.all([get('/api/snapshot'), get('/api/signals?limit=60'), get('/api/status')]);
+    if (s){
+      snap = s;
+      if (s.gates){
+        RS_GATE = s.gates.candidate_rs_score;
+        P_GATE = s.gates.candidate_persistence;
+      }
     }
+    events = h || [];
+    status = st;
+    reachable = true;
+  } catch (err) {
+    /* A rejected fetch must not leave the page painting its start-up state.
+       "Cannot reach the server" and "no loop is configured" are different
+       situations, and only one of them is fine. */
+    reachable = false;
+    unreachableWhy = String(err && err.message || err);
   }
-  events = h || [];
-  status = st;
   render();
 }
 
