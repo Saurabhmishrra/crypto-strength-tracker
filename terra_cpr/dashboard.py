@@ -630,11 +630,23 @@ function renderHealth(){
   $('loopText').textContent = state;
   /* Whatever is wrong gets said in words, at full width. A fault buried in a
      tooltip is a fault nobody reads. */
+  const dropped = (status && status.excluded_symbols) || {};
+  const names = Object.keys(dropped);
+  /* A shrunk panel is never allowed to be silent: every rank on this screen is
+     cross-sectional, so who is missing changes what the survivors mean. */
+  /* Symbols usually drop out together and for one shared reason. Printing that
+     reason once per symbol buries the names, which are the part worth reading. */
+  const byReason = {};
+  names.forEach(n => (byReason[dropped[n]] = byReason[dropped[n]] || []).push(n));
+  const shrunk = names.length
+    ? names.length + ' symbol' + (names.length > 1 ? 's' : '') + ' held out of the cross-section &mdash; '
+      + Object.keys(byReason).map(r => esc(byReason[r].join(', ')) + ': ' + esc(r)).join(' &middot; ')
+    : '';
   const fault = !reachable
     ? 'Cannot reach the scanner at ' + location.host + '. ' + esc(unreachableWhy) + ' &mdash; the server is probably not running.'
     : state === 'failing'
       ? 'The refresh loop has failed ' + status.consecutive_failures + ' times in a row. ' + esc(status.last_error || '')
-      : '';
+      : shrunk;
   $('fault').innerHTML = fault;
   $('fault').hidden = !fault;
   $('age').textContent = snap ? ago(snap.as_of) : '—';

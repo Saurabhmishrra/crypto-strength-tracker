@@ -399,5 +399,157 @@ class LiveScannerTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
 
 
+class _PartialFailureSource(_FakeSource):
+    """One symbol's candle endpoint sheds load; every other symbol answers."""
+
+    def __init__(self, symbols):
+        super().__init__(symbols)
+        self.break_symbol = None
+
+    def admit(self, name, volume):
+        """Rotate a new symbol into the universe on volume rank."""
+        self.symbols.append(name)
+        self.mids[name] = 42.0
+        self.volumes[name] = volume
+
+    def fetch_candles(self, symbol, interval, start, end):
+        if symbol == self.break_symbol:
+            raise RuntimeError(f"load shed on {symbol}")
+        return super().fetch_candles(symbol, interval, start, end)
+
+
+class UniverseAdmissionTests(unittest.TestCase):
+    """A symbol may only be scanned once its bars are actually cached.
+
+    The wedge this guards against: ``_refresh_universe`` published a rotated
+    universe *before* ``_refresh_candles`` filled the cache. When a fetch died
+    partway, ``self.symbols`` named a symbol the caches had never heard of, and
+    because ``scan_assets`` has no per-asset guard, every later fast tick raised
+    ``at least two completed daily candles are required`` -- taking all the
+    healthy symbols down with it, permanently, until the process was restarted.
+    """
+
+    def setUp(self):
+        import tempfile
+        from terra_cpr.live import LiveConfig, LiveScanner
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.output = Path(self.tmp.name)
+        self.as_of = BASE + timedelta(days=3, hours=6)
+        self.source = _PartialFailureSource(["BTC", "AAA", "BBB"])
+        self.clock = _FakeClock()
+        self.scanner = LiveScanner(
+            output_dir=self.output, source=self.source,
+            live_config=LiveConfig(universe_size=4, hourly_window=50, daily_window=10),
+            sleep=self.clock.sleep, monotonic=self.clock.monotonic,
+        )
+
+    def _rotate_in_a_broken_symbol(self):
+        """Warm the cache, then add a symbol whose candle fetch always fails."""
+        self.scanner.tick(self.as_of, refresh_candles=True)
+        self.source.admit("CCC", volume=999.0)
+        self.source.break_symbol = "CCC"
+        self.scanner.tick(self.as_of + timedelta(hours=1), refresh_candles=True)
+
+    def test_a_symbol_whose_candles_never_arrived_is_not_scanned(self):
+        self._rotate_in_a_broken_symbol()
+        self.assertNotIn("CCC", self.scanner.symbols)
+
+    def test_a_partial_refresh_does_not_wedge_the_following_fast_ticks(self):
+        """The regression: fast ticks skip the refresh, so a symbol admitted
+        without bars can never heal itself and every later tick dies on it."""
+        self._rotate_in_a_broken_symbol()
+        self.source.break_symbol = None  # the endpoint recovers completely
+        for minute in range(1, 4):
+            self.scanner.tick(self.as_of + timedelta(hours=1, minutes=minute), refresh_candles=False)
+        status = self.scanner.status()
+        self.assertEqual(status.consecutive_failures, 0, status.last_error)
+        self.assertIsNone(status.last_error)
+
+    def test_the_healthy_symbols_keep_being_published(self):
+        import json
+
+        self._rotate_in_a_broken_symbol()
+        snapshot = json.loads((self.output / "scanner_latest.json").read_text())
+        self.assertEqual({row["symbol"] for row in snapshot["rows"]}, {"AAA", "BBB"})
+
+    def test_an_excluded_symbol_is_named_rather_than_silently_dropped(self):
+        """A quietly shrunk panel corrupts every cross-sectional rank drawn from
+        it, so the exclusion has to be visible on the health rail."""
+        self._rotate_in_a_broken_symbol()
+        excluded = self.scanner.status().excluded_symbols
+        self.assertIn("CCC", excluded)
+        self.assertIn("load shed on CCC", excluded["CCC"])
+
+    def test_a_cached_symbol_survives_a_failed_top_up_on_slightly_stale_bars(self):
+        """Dropping an already-cached symbol would shrink the cross-section for
+        a transient shed. Stale bars are the lesser evil, and are already
+        reported as stale by the relative-strength quality flags."""
+        self.scanner.tick(self.as_of, refresh_candles=True)
+        self.source.break_symbol = "AAA"
+        self.scanner.tick(self.as_of + timedelta(hours=1), refresh_candles=True)
+        self.assertIn("AAA", self.scanner.symbols)
+        self.assertNotIn("AAA", self.scanner.status().excluded_symbols)
+
+    def test_a_recovered_symbol_is_readmitted_at_the_next_refresh(self):
+        self._rotate_in_a_broken_symbol()
+        self.source.break_symbol = None
+        self.scanner.tick(self.as_of + timedelta(hours=2), refresh_candles=True)
+        self.assertIn("CCC", self.scanner.symbols)
+        self.assertEqual(self.scanner.status().excluded_symbols, {})
+
+    def test_losing_the_benchmark_fails_the_tick_loudly(self):
+        """Every rank in the panel is measured against BTC. A panel without it
+        is not a smaller panel, it is a meaningless one."""
+        self.source.break_symbol = "BTC"
+        self.scanner.tick(self.as_of, refresh_candles=True)
+        status = self.scanner.status()
+        self.assertEqual(status.consecutive_failures, 1)
+        self.assertIn("BTC", status.last_error or "")
+        self.assertFalse((self.output / "scanner_latest.json").exists())
+
+
+class ColdStartTests(unittest.TestCase):
+    """How the wedge actually reached production.
+
+    A cold start fetches 2 intervals for every symbol back to back. One shed
+    response anywhere in that run used to abort ``_refresh_candles`` with
+    ``self.symbols`` already holding the full universe, so the very first tick
+    failed and every fast tick after it failed identically -- a fresh process
+    would come up already wedged, never recording a single successful tick.
+    """
+
+    def setUp(self):
+        import tempfile
+        from terra_cpr.live import LiveConfig, LiveScanner
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.output = Path(self.tmp.name)
+        self.source = _PartialFailureSource(["BTC", "AAA", "BBB"])
+        clock = _FakeClock()
+        self.scanner = LiveScanner(
+            output_dir=self.output, source=self.source,
+            live_config=LiveConfig(universe_size=3, hourly_window=50, daily_window=10),
+            sleep=clock.sleep, monotonic=clock.monotonic,
+        )
+        self.as_of = BASE + timedelta(days=3, hours=6)
+
+    def test_a_shed_during_the_cold_fetch_still_yields_a_usable_panel(self):
+        self.source.break_symbol = "BBB"
+        self.scanner.tick(self.as_of, refresh_candles=True)
+        status = self.scanner.status()
+        self.assertEqual(status.consecutive_failures, 0, status.last_error)
+        self.assertEqual(self.scanner.symbols, ["BTC", "AAA"])
+        self.assertIn("BBB", status.excluded_symbols)
+
+    def test_a_failed_refresh_is_not_recorded_as_a_completed_one(self):
+        self.source.break_symbol = "BTC"
+        self.scanner.tick(self.as_of, refresh_candles=True)
+        self.assertEqual(self.scanner.status().consecutive_failures, 1)
+        self.assertIsNone(self.scanner.status().last_candle_refresh)
+
+
 if __name__ == "__main__":
     unittest.main()

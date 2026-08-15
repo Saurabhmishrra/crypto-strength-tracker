@@ -350,6 +350,39 @@ Recorded rather than quietly edited, because the reasoning matters more than the
    purely by persistence arrives with an empty `blockers` list and no visible explanation
    — which is the common case, since persistence binds far more often than the other two.
 
+5. **Universe membership and cache readiness were conflated, and it wedged the loop.**
+   §1.3 and §1.4 treated selection and candle-fetching as two independent steps.
+   `_refresh_universe` published the volume-ranked list into `self.symbols` and
+   `_refresh_candles` then filled the cache. When a fetch shed partway through — 40
+   symbols x 2 intervals is 80 back-to-back requests, so this is routine, not rare —
+   `self.symbols` named a symbol the cache had never heard of. `scan_assets` has no
+   per-asset guard, so `build_market_structure` raised `at least two completed daily
+   candles are required` through the entire panel; and because fast ticks never refetch,
+   nothing could heal it. A fresh process could come up already wedged and never record a
+   single successful tick, recovering only when some later hourly refresh happened to get
+   a clean run across all 80 requests. Membership is now an *admission* decision: a symbol
+   is scannable when its cache holds the two completed daily bars a CPR needs, never
+   because it won a volume rank. A symbol already holding bars survives a failed top-up on
+   slightly stale bars, since a quietly shrinking panel corrupts every cross-sectional rank
+   drawn from it — and whatever is held out is named on the health rail rather than simply
+   going missing.
+6. **The atomic write was not safe to retry.** `write_json_atomic` used one fixed
+   `<name>.tmp` and left it in place when the rename failed. On macOS the abandoned file
+   keeps the `com.apple.macl` tag TCC stamps on it, so every subsequent `os.replace` onto
+   the real snapshot is denied too: one transient permission error became a permanently
+   frozen dashboard that survived a process restart. The temporary is now unique per write
+   and removed on failure, so a denial costs one tick instead of all of them. Note this
+   made the publish *self-healing*, not permitted — see "Operational note" below.
+
+## Operational note — the loop needs a durable filesystem grant
+
+`output/` sits under `~/Documents`, which macOS protects with TCC. A server left running
+detached from the shell that launched it loses that grant when its responsible parent
+process goes away, and then every publish fails with `EPERM` on the rename while an
+ordinary shell in the same directory can still write freely. This is environmental, not a
+defect in the loop, and no amount of retry logic fixes it. Run the server from a terminal
+that holds its own durable grant, or point `--output` at a directory outside `~/Documents`.
+
 ## Observations about the strategy, not changed
 
 - **The pivot leg of the candidate rule is mathematically redundant.** `TC = 2P - BC`

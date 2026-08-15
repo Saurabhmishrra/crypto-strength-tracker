@@ -55,3 +55,81 @@ class DataAndScannerTests(unittest.TestCase):
             path.write_text("[scanner]\ninterval_seconds = 900\n")
             with self.assertRaises(ValueError):
                 load_scanner_config(path, 3600)
+
+
+class AtomicWriteTests(unittest.TestCase):
+    """A failed publish must not sabotage the next one.
+
+    The writer used one fixed ``<name>.tmp`` path and left it in place when the
+    rename failed. On macOS the abandoned file kept the ``com.apple.macl`` tag
+    TCC had stamped on it, so every later ``os.replace`` onto the real snapshot
+    was denied too: one transient permission error turned into a permanently
+    frozen dashboard that outlived a process restart.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = Path(self.tmp.name)
+        self.target = self.directory / "scanner_latest.json"
+
+    def _strays(self) -> list[Path]:
+        return [p for p in self.directory.iterdir() if p != self.target]
+
+    def test_a_successful_write_leaves_no_temporary_behind(self) -> None:
+        from terra_cpr.report import write_json_atomic
+
+        write_json_atomic(self.target, {"ok": True})
+        self.assertEqual(json.loads(self.target.read_text()), {"ok": True})
+        self.assertEqual(self._strays(), [])
+
+    def test_the_published_snapshot_keeps_an_ordinary_readable_mode(self) -> None:
+        """mkstemp creates 0600 and os.replace preserves the source mode, so an
+        unguarded temp-file swap silently tightens what it publishes."""
+        import stat
+
+        from terra_cpr.report import write_json_atomic
+
+        write_json_atomic(self.target, {"ok": True})
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o644)
+
+    def test_a_failed_rename_leaves_no_temporary_to_poison_the_next_write(self) -> None:
+        import os as os_module
+
+        from terra_cpr import report
+
+        original = report.os.replace
+
+        def deny(*_args, **_kwargs):
+            raise PermissionError(1, "Operation not permitted")
+
+        report.os.replace = deny
+        try:
+            with self.assertRaises(PermissionError):
+                report.write_json_atomic(self.target, {"attempt": 1})
+        finally:
+            report.os.replace = original
+        self.assertEqual(self._strays(), [], "a stray temp file survived a failed rename")
+
+        report.write_json_atomic(self.target, {"attempt": 2})
+        self.assertEqual(json.loads(self.target.read_text()), {"attempt": 2})
+        self.assertEqual(os_module.path.exists(self.target), True)
+
+    def test_concurrent_writers_do_not_share_one_temporary_path(self) -> None:
+        """Two writers colliding on a fixed temp name can publish a torn file."""
+        from terra_cpr import report
+
+        seen: list[str] = []
+        original = report.os.replace
+
+        def record(source, destination):
+            seen.append(str(source))
+            return original(source, destination)
+
+        report.os.replace = record
+        try:
+            report.write_json_atomic(self.target, {"n": 1})
+            report.write_json_atomic(self.target, {"n": 2})
+        finally:
+            report.os.replace = original
+        self.assertEqual(len(set(seen)), 2, f"temp path was reused across writes: {seen}")

@@ -181,6 +181,13 @@ class SafetyBoundary(unittest.TestCase):
         self.assertIn("consecutive_failures", html)
         self.assertIn("last_error", html)
 
+    def test_a_shrunken_panel_is_named_on_screen(self):
+        """Every rank here is cross-sectional. Dropping a symbol quietly changes
+        what every surviving rank means, so the held-out set must be visible."""
+        html = dashboard_html()
+        self.assertIn("excluded_symbols", html)
+        self.assertIn("held out of the cross-section", html)
+
     def test_the_page_only_ever_issues_get_requests(self):
         html = dashboard_html()
         self.assertNotIn("XMLHttpRequest", html)

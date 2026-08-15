@@ -53,6 +53,18 @@ only about how fresh their inputs are. A cold start for 60 perps takes roughly 3
 Run the loop without a dashboard using `terra-cpr live`, or omit `--live` from `serve` to
 read whatever a previous scan wrote and touch the network never.
 
+**Run it from a terminal you keep open.** `output/` sits under `~/Documents`, which macOS
+protects with TCC. A server detached from the shell that launched it loses that grant when
+its responsible parent process exits, and from then on every publish fails with
+`EPERM: Operation not permitted` on the snapshot rename — while an ordinary shell in the
+same directory still writes fine. The health rail reports it as `failing` with the exact
+error. Nothing in the loop can retry its way out of it; either keep the launching terminal
+alive, or put the snapshot outside the protected tree:
+
+```bash
+python3 -m terra_cpr.cli serve --output ~/Library/Application\ Support/terra-cpr --live --universe 40
+```
+
 The loop is public-data only: it selects a universe from `metaAndAssetCtxs` and reads
 candles. There is no private endpoint, no signing code, and no order path. Note that the
 public `/info` endpoint sheds load by answering HTTP 200 with an **empty array** rather

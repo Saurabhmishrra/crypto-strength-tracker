@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import tempfile
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -48,10 +49,32 @@ def scan_snapshot(
 
 
 def write_json_atomic(path: Path, payload: Any) -> None:
+    """Publish a snapshot in one indivisible step, leaving nothing behind.
+
+    The temporary is unique per write and is removed when the rename fails.
+    A single fixed ``<name>.tmp`` reused across writes is a trap: on macOS the
+    abandoned file keeps the ``com.apple.macl`` tag TCC stamped on it, so every
+    later ``os.replace`` onto the real snapshot is denied as well, and one
+    transient permission error becomes a permanently frozen dashboard that
+    survives a process restart. A unique name also stops two writers from
+    clobbering each other's half-written file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, default=_json_default, sort_keys=True))
-    os.replace(temporary, path)
+    handle, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(handle, "w") as stream:
+            stream.write(json.dumps(payload, indent=2, default=_json_default, sort_keys=True))
+        # mkstemp creates 0600 and os.replace preserves the source mode, which
+        # would silently tighten the published snapshot. Restore the ordinary
+        # mode a plain write would have produced.
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _number(value: Any, digits: int = 2) -> str:

@@ -22,6 +22,11 @@ from .signal_history import append_history, signal_transitions
 
 DAY_SECONDS = 86_400
 
+#: Two completed sessions is the hard floor for a CPR: yesterday defines today's
+#: levels and the one before it is needed to place them in context. Below this,
+#: ``build_market_structure`` raises rather than guessing.
+MIN_DAILY_BARS = 2
+
 
 class UniverseError(RuntimeError):
     """Raised when the public metadata response is not the shape we require.
@@ -228,6 +233,9 @@ class LiveStatus:
     next_candle_refresh: Optional[str]
     consecutive_failures: int
     last_error: Optional[str]
+    #: Symbols the universe selected but the caches cannot support yet, mapped
+    #: to why. Never empty silently: a shrunken panel has to be visible.
+    excluded_symbols: Mapping[str, str] = field(default_factory=dict)
 
 
 class LiveScanner:
@@ -269,31 +277,69 @@ class LiveScanner:
         self._next_candle_refresh: Optional[datetime] = None
         self._failures = 0
         self._error: Optional[str] = None
+        self._excluded: dict[str, str] = {}
 
     # -- data acquisition -------------------------------------------------
 
-    def _refresh_universe(self) -> None:
+    def _refresh_universe(self) -> list[str]:
+        """Select the candidate universe. Candidates are not yet scannable."""
         meta, contexts = self.source.fetch_meta_and_contexts()
-        self.symbols = select_universe(
+        return select_universe(
             meta, contexts, self.live_config.universe_size, self.scanner_config.benchmark
         )
 
-    def _refresh_candles(self, as_of: datetime) -> None:
-        """Cold-fetch the full window once, then only the delta plus an overlap."""
+    def _refresh_candles(self, candidates: Sequence[str], as_of: datetime) -> list[str]:
+        """Top candles up, then admit only the symbols the caches can support.
+
+        Admission is what keeps a rotating universe honest. A symbol becomes
+        scannable when its cache holds the two completed daily bars every CPR
+        needs -- not when it wins a volume rank. Publishing the candidate list
+        before the bars arrive is what once wedged this loop: ``scan_assets``
+        has no per-asset guard, so a single symbol without daily bars raised
+        through the whole panel, and fast ticks never refetch, so it could not
+        heal until the process was restarted.
+
+        A symbol already holding bars is kept even when its top-up fails. Its
+        bars go stale -- which the relative-strength quality flags already
+        report -- and stale is strictly better than dropping it, because a
+        quietly shrinking panel corrupts every cross-sectional rank drawn from
+        it.
+        """
         interval = self.scanner_config.interval_seconds
-        for symbol in self.symbols:
-            for cache, label, step, depth in (
-                (self.hourly, "1h", interval, self.live_config.hourly_window),
-                (self.daily, "1d", DAY_SECONDS, self.live_config.daily_window),
-            ):
-                last = cache.last_timestamp(symbol)
-                if last is None:
-                    start = as_of - timedelta(seconds=step * depth)
-                else:
-                    # Re-request the stored tail so a bar captured mid-formation
-                    # is replaced by its settled version.
-                    start = last - timedelta(seconds=step * 2)
-                cache.merge(symbol, self.fetcher.fetch(symbol, label, start, as_of))
+        admitted: list[str] = []
+        excluded: dict[str, str] = {}
+        for symbol in candidates:
+            failure: Optional[str] = None
+            try:
+                for cache, label, step, depth in (
+                    (self.hourly, "1h", interval, self.live_config.hourly_window),
+                    (self.daily, "1d", DAY_SECONDS, self.live_config.daily_window),
+                ):
+                    last = cache.last_timestamp(symbol)
+                    if last is None:
+                        start = as_of - timedelta(seconds=step * depth)
+                    else:
+                        # Re-request the stored tail so a bar captured mid-formation
+                        # is replaced by its settled version.
+                        start = last - timedelta(seconds=step * 2)
+                    cache.merge(symbol, self.fetcher.fetch(symbol, label, start, as_of))
+            except Exception as exc:  # noqa: BLE001 - one symbol must not cost the panel
+                failure = f"{type(exc).__name__}: {exc}"
+            if len(completed_bars(self.daily.get(symbol), DAY_SECONDS, as_of)) >= MIN_DAILY_BARS:
+                admitted.append(symbol)
+            else:
+                excluded[symbol] = failure or (
+                    f"fewer than {MIN_DAILY_BARS} completed daily bars cached"
+                )
+        if self.scanner_config.benchmark not in admitted:
+            raise UniverseError(
+                f"benchmark {self.scanner_config.benchmark} has no usable candles "
+                f"({excluded.get(self.scanner_config.benchmark, 'absent from the universe')}); "
+                "a panel without it has no comparable cross-section"
+            )
+        with self._lock:
+            self._excluded = excluded
+        return admitted
 
     # -- the tick ---------------------------------------------------------
 
@@ -301,8 +347,8 @@ class LiveScanner:
         """Run one scan. A failure is recorded, never written as a partial panel."""
         try:
             if refresh_candles or not self.symbols:
-                self._refresh_universe()
-                self._refresh_candles(as_of)
+                # Only the admitted subset is ever published as scannable.
+                self.symbols = self._refresh_candles(self._refresh_universe(), as_of)
             mids = {
                 symbol: float(price)
                 for symbol, price in self.source.fetch_mids().items()
@@ -356,6 +402,7 @@ class LiveScanner:
                 ),
                 consecutive_failures=self._failures,
                 last_error=self._error,
+                excluded_symbols=dict(self._excluded),
             )
 
     # -- threading --------------------------------------------------------
