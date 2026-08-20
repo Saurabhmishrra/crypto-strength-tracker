@@ -115,6 +115,31 @@ class AtomicWriteTests(unittest.TestCase):
         self.assertEqual(json.loads(self.target.read_text()), {"attempt": 2})
         self.assertEqual(os_module.path.exists(self.target), True)
 
+    def test_a_denied_cleanup_does_not_mask_why_the_write_failed(self) -> None:
+        """The cleanup runs on the failure path, where the filesystem is often
+        exactly what is refusing us. If the unlink is denied too, the caller
+        must still learn the real reason -- the health rail shows last_error,
+        and a swapped-in cleanup error sends the reader after the wrong fault."""
+        from terra_cpr import report
+
+        original_replace, original_unlink = report.os.replace, Path.unlink
+
+        def deny_replace(*_a, **_k):
+            raise PermissionError(1, "Operation not permitted: the rename")
+
+        def deny_unlink(*_a, **_k):
+            raise PermissionError(1, "Operation not permitted: the cleanup")
+
+        report.os.replace = deny_replace
+        Path.unlink = deny_unlink
+        try:
+            with self.assertRaises(PermissionError) as caught:
+                report.write_json_atomic(self.target, {"attempt": 1})
+        finally:
+            report.os.replace, Path.unlink = original_replace, original_unlink
+        self.assertIn("the rename", str(caught.exception))
+        self.assertNotIn("the cleanup", str(caught.exception))
+
     def test_concurrent_writers_do_not_share_one_temporary_path(self) -> None:
         """Two writers colliding on a fixed temp name can publish a torn file."""
         from terra_cpr import report

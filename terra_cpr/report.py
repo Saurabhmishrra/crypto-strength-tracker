@@ -73,7 +73,13 @@ def write_json_atomic(path: Path, payload: Any) -> None:
         os.chmod(temporary, 0o644)
         os.replace(temporary, path)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        # The cleanup runs on the failure path, where the filesystem is often
+        # exactly what is refusing us. A denied unlink must not replace the
+        # error that explains why the write failed.
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
         raise
 
 
