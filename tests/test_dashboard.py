@@ -16,7 +16,7 @@ from terra_cpr.dashboard import _Handler, dashboard_html, serve
 from terra_cpr.live import LiveStatus
 
 SNAPSHOT = {
-    "schema_version": 2,
+    "schema_version": 3,
     "as_of": "2026-08-07T05:00:00+00:00",
     "gates": {"candidate_rs_score": 3.5, "candidate_persistence": 0.40},
     "rows": [{"symbol": "SOL", "setup": {"label": "WATCH"}}],
@@ -139,6 +139,11 @@ class StatusWithFailingLoop(_ServerCase):
 
 
 class SafetyBoundary(unittest.TestCase):
+    def test_the_product_uses_the_strength_tracker_name(self):
+        html = dashboard_html()
+        self.assertIn("Strength Tracker", html)
+        self.assertNotIn("Terra CPR", html)
+
     def test_serve_exposes_no_bind_address_parameter(self):
         """Binding beyond loopback must require editing the source, not a flag."""
         parameters = set(inspect.signature(serve).parameters)

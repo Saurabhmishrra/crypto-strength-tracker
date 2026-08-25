@@ -1,24 +1,25 @@
-# Terra CPR
+# Strength Tracker
 
-Terra CPR is a separate, **research-first market-structure and relative-strength scanner**. It is not connected to an exchange account and contains no order-placement code or credential loading.
+Strength Tracker is a **research-first, beta-adjusted relative-strength and market-structure scanner**. CPR is one structure input, not the product identity. It is not connected to an exchange account and contains no order-placement code or credential loading.
 
 The immediate objective is to answer a narrower question honestly: *do persistent, beta-adjusted relative-strength regimes add useful information to CPR and pivot context after realistic trading costs?* The scanner can rank and explain candidates; it must not be used as proof of an executable trading edge.
 
 ## Safety boundary
 
 - The reference project at `two_day_cpr_bot` is never imported, modified, or launched by this project.
-- Terra CPR only has public-market-data interfaces. There is no execution client, private key, or API-secret setting.
+- Strength Tracker only has public-market-data interfaces. There is no execution client, private key, or API-secret setting.
 - A `LONG_CANDIDATE` or `SHORT_CANDIDATE` is a research label, not an order instruction.
 - Adding paper trading is a separate, explicit phase after the hypotheses in [`RESEARCH.md`](RESEARCH.md) pass their gates.
 
 ## What is implemented now
 
-- Daily CPR and floor-trader pivot calculations, normalized CPR-width percentile, ATR, realised volatility, level distances, and price/open location.
-- Multi-horizon, beta-adjusted relative strength versus BTC with residual volatility normalisation, beta quality, persistence, and acceleration.
-- Cross-sectional ranking and explainable CPR + RS candidate labels.
+- Daily CPR and floor-trader pivot calculations, normalized CPR-width percentile, Wilder ATR, realised volatility, level distances, and price/open location.
+- Robust EWMA beta versus BTC, optional orthogonal ETH factor, beta uncertainty, and multi-horizon relative strength standardised against each token's empirical rolling residual distribution.
+- Cross-sectional ranking and explainable CPR + RS labels, with live mid-price previews explicitly separated from completed-bar confirmations.
 - Fixture-driven scanner CLI that writes an atomic JSON snapshot and lightweight static HTML report.
 - A read-only live loop over public Hyperliquid data, and a local research cockpit that draws the structure instead of naming it.
-- An event-study / chronological split metrics module for testing candidate rules without silently using future data.
+- A point-in-time historical event generator and chronological outcome report for testing the frozen completed-close rule without silently using future data.
+- Research-only collection of impact spread, a candle-derived relative-notional proxy, funding, open interest, and market breadth. None enters the score until it improves untouched out-of-sample results.
 
 ## Quick start
 
@@ -30,6 +31,18 @@ python -m terra_cpr.cli demo --output output
 
 The demo is deliberately synthetic. It validates plumbing only; it conveys no market result.
 
+For a full-history fixture, generate completed-close events and a chronological train/test report with:
+
+```bash
+python3 -m terra_cpr.cli backtest --input path/to/history.json --cost-bps 10 \
+  --output output/research_report.json
+```
+
+The report includes signed asset return (the feasibility/P&L view), event-time
+BTC-beta-adjusted forward log return, and the full BTC + orthogonal-ETH model residual
+return. It does not prove an edge by itself; rolling folds and a final untouched holdout
+remain required.
+
 ## Live scanning and the local cockpit
 
 ```bash
@@ -39,24 +52,26 @@ python3 -m terra_cpr.cli serve --output output --live --universe 60
 Open `http://127.0.0.1:8765`. See [`DASHBOARD.md`](DASHBOARD.md) for the signal semantics
 and what each visual encodes.
 
-`--live` adds a **two-tier public-data loop**. Relative strength cannot change until an
-hourly bar closes, but the structure leg of the rule moves continuously and is what flips
-`WATCH` into a candidate — so the tiers are split:
+`--live` adds a **two-tier public-data loop**. Relative strength cannot change until the
+configured bar closes. The structure leg moves continuously, but a mid-price move creates
+only a `PROVISIONAL` preview; a `CONFIRMED` candidate requires a completed close:
 
-- **every 20s** — one `allMids` request refreshes prices, and the panel is rescanned from
-  cached bars.
-- **just after each hourly close** — only the new bars are fetched per symbol and merged.
+- **every 20s** — one `allMids` request refreshes prices and provisional structure state.
+- **just after each configured bar close** — new bars are merged and completed-close
+  confirmation is evaluated. Only confirmed transitions enter alerts and history.
 
 Both tiers call the same `scan_assets`, so they cannot disagree about strategy logic —
 only about how fresh their inputs are. A cold start for 60 perps takes roughly 30 seconds.
 
-Run the loop without a dashboard using `terra-cpr live`, or omit `--live` from `serve` to
+Run the loop without a dashboard using `strength-tracker live`, or omit `--live` from `serve` to
 read whatever a previous scan wrote and touch the network never.
+
+The previous `terra-cpr` command remains as a compatibility alias.
 
 **For anything long-running, write the snapshot outside `~/Documents`:**
 
 ```bash
-python3 -m terra_cpr.cli serve --output ~/Library/Application\ Support/terra-cpr --live --universe 40
+python3 -m terra_cpr.cli serve --output ~/Library/Application\ Support/strength-tracker --live --universe 40
 ```
 
 `output/` sits under `~/Documents`, which macOS protects with TCC. A server detached from
@@ -95,6 +110,13 @@ cross-sectional rank computed from it.
 
 The scanner rejects or marks an asset insufficient when timestamps do not align, data is stale, or the required history is unavailable. It never fills gaps with a previous price.
 
+Time windows are duration-preserving. Changing `interval_seconds` from 1h to 15m
+automatically changes 4/24/168 bars into 16/96/672 bars, keeps persistence at 24h,
+and keeps beta estimation at 30 days unless bar-count overrides are explicitly supplied.
+With the public Hyperliquid adapter, 15m is the shortest default profile that fits the
+provider's 5,000-candle history limit. Faster profiles fail loudly instead of silently
+estimating the model on a shorter history.
+
 ## Project map
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — reference audit, reuse/discard decisions, and target architecture.
@@ -103,7 +125,7 @@ The scanner rejects or marks an asset insufficient when timestamps do not align,
 - [`terra_cpr/relative_strength.py`](terra_cpr/relative_strength.py) — persistent beta-adjusted RS.
 - [`terra_cpr/scanner.py`](terra_cpr/scanner.py) — ranking and candidate labels.
 - [`terra_cpr/data.py`](terra_cpr/data.py) — read-only fixture and public Hyperliquid data adapters.
-- [`terra_cpr/research.py`](terra_cpr/research.py) — split-aware evaluation metrics.
+- [`terra_cpr/research.py`](terra_cpr/research.py) — point-in-time event generation and split-aware evaluation metrics.
 
 ## Deliberately deferred
 

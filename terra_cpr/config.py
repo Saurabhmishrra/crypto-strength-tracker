@@ -1,7 +1,7 @@
 """Strict, small TOML configuration loader for the scanner layer."""
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -81,10 +81,11 @@ def load_scanner_config(path: Path, fallback_interval_seconds: int) -> ScannerCo
     unknown_scanner = sorted(set(scanner_values).difference(allowed_scanner))
     if unknown_scanner:
         raise ValueError(f"unknown ScannerConfig setting(s): {', '.join(unknown_scanner)}")
+    rs_config = replace(RSConfig.for_interval(int(scanner_values["interval_seconds"])), **rs_values)
     config = ScannerConfig(
         **scanner_values,
         market=MarketStructureConfig(**market_values),
-        rs=RSConfig(**rs_values),
+        rs=rs_config,
     )
     if config.interval_seconds != fallback_interval_seconds:
         raise ValueError(

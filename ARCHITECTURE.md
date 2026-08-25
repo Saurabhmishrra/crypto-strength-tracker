@@ -1,14 +1,14 @@
-# Terra CPR design
+# Strength Tracker design
 
 ## Read-only reference assessment
 
 The existing `two_day_cpr_bot` was inspected as reference material only. Its CPR formula is conventional and its public Hyperliquid data conventions are useful. Its research notes contain the more important result: raw directional Two-Day CPR, a width-gated breakout, and the CPR/EMA/pivot variant all failed their out-of-sample edge gates. CPR width did show a repeatable relationship to *next-session range*, not direction.
 
-The current RS screener has a sound starting idea — log-price residual versus a beta-scaled BTC benchmark — but it is a single 24-hour z-score alert with provisional weights. It lacks beta-quality diagnostics, multi-horizon persistence, reliable stale-data gates, and outcome research. It is a discovery view, not alpha evidence.
+The inherited RS idea — log-price residual versus a beta-scaled BTC benchmark — was a sound starting point, but the original single-window approximate z-score lacked robust beta diagnostics, multi-horizon persistence, reliable stale-data gates, and point-in-time outcomes. Strength Tracker addresses those implementation gaps; predictive value is still an empirical question, not alpha evidence.
 
 ## Reuse versus discard
 
-| Reference component | Terra decision | Reason |
+| Reference component | Strength Tracker decision | Reason |
 | --- | --- | --- |
 | CPR calculation | Reimplement as a pure function | Conventional, correct, and simple. A fresh implementation avoids coupling to a live package. |
 | Floor-trader pivot formula | Reimplement | Useful structural coordinate system; never assumed predictive on its own. |
@@ -59,23 +59,35 @@ No field is a prediction. The feature layer answers “where are we, and how unu
 
 ## Relative Strength Engine
 
-For aligned completed bars, the engine estimates
+For aligned completed bars, the engine estimates a robust exponentially weighted factor model:
 
-`r_alt = alpha + beta × r_BTC + residual`
+`r_alt = alpha + beta_BTC × r_BTC + beta_ETH × orthogonal_ETH + residual`
 
-on a trailing window. It then measures beta-adjusted relative returns across short, medium, and long horizons, each divided by residual volatility for that horizon. The score is a bounded signed composite of those normalised returns, residual-return persistence, and acceleration. It also publishes `beta`, `R²`, residual volatility, history count, and data-quality flags.
+BTC is always the primary factor. When ETH is available, its return is first residualised against BTC so the second coefficient measures ETH/alt-market behaviour rather than counting BTC exposure twice. Coefficients use EWMA weights and MAD winsorisation; the engine publishes approximate coefficient uncertainty, effective observations, `R²`, residual volatility, history count, and quality flags.
+
+For each 4h/24h/7d horizon, the current factor-adjusted cumulative return is divided by the robust scale of that token's prior rolling horizon sums. The scale is `1.4826 × MAD`, with a standard-deviation fallback only when MAD degenerates. This empirical distribution reflects observed clustering, autocorrelation, and tails much better than `one-bar sigma × sqrt(horizon)`. Because rolling windows overlap, the result is a descriptive robust unit, not a p-value or an independent Gaussian z-score. The bounded `-10..+10` composite is also not a z-score: `3.5` never means `3.5σ`.
+
+The bar interval changes sampling resolution, not the intended economic horizons. `RSConfig.for_interval` preserves 4h/24h/7d horizons, 24h persistence, a 30-day beta window, and a 7-day EWMA half-life when switching between supported intervals.
 
 This design explicitly answers the failure modes of a simple “alt return minus BTC return” screen:
 
 - A high-beta asset must exceed its *own expected BTC response* to rank highly.
 - A single spike cannot dominate because medium/long relative returns and persistence are separate terms.
-- Low-quality beta fits remain visible, rather than being silently treated as precise.
+- Low-quality or uncertain beta fits remain visible, rather than being silently treated as precise.
 - It does not treat equal raw returns as equal RS when an alt normally moves 2–3× BTC.
 
-Volume, funding, OI, and liquidation data are intentionally **not** score terms yet. They are plausible *independent forces*, but their data definitions and incremental forward-return value must first be tested. Adding them as decorative confirmations would be indicator soup.
+Impact spread, a candle-derived relative-notional proxy, funding, open interest, and cross-sectional breadth are collected as **research context**, not score terms. They are plausible independent forces, but their incremental forward-return value must first be tested in the declared order. Liquidations remain unimplemented because the current public adapter has no clean point-in-time history for them. Adding any field as a decorative confirmation would be indicator soup.
 
 ## CPR + RS decision engine
 
-Terra emits research labels, never automatic trades. A long candidate currently requires persistent positive RS plus price above TC and the daily pivot; a short is symmetrical below BC and the pivot. An R1/S1 cross can increase the structural score but is not required. Otherwise the result is `WATCH` or `NEUTRAL`.
+Strength Tracker emits research labels, never automatic trades. A long candidate requires persistent positive RS plus price acceptance above TC and the daily pivot; a short is symmetrical below BC and the pivot. Otherwise the result is `WATCH` or `NEUTRAL`.
+
+In live mode a current public mid beyond structure is labelled `PROVISIONAL`. It is visible as an early heads-up but creates no durable history event. `CONFIRMED` requires the last completed bar to close beyond structure; only confirmed transitions enter alerts and historical evaluation. A confirmed state remains tied to that close even if the next live mid temporarily retreats, with the retreat shown as a blocker.
+
+## Point-in-time research path
+
+`generate_point_in_time_events` rebuilds the eligible volume-ranked universe, completed intraday history, completed daily structure, factor fit, RS values, and market breadth at every historical close. It records only new confirmed activations, then attaches fixed-horizon outcomes after event generation. The CLI `backtest` report keeps tradable asset return separate from event-time BTC-beta-adjusted and full BTC + orthogonal-ETH residual returns, and applies a chronological train/test split.
+
+This closes the tooling gap; it does not fill the evidence gap. Real point-in-time history, declared costs, rolling out-of-sample folds, and a final untouched holdout are still required before an input or label can be promoted.
 
 This is a transparent hypothesis generator, not a conclusion that those combinations work. The labels are designed to produce a finite, timestamped event set for the tests below.

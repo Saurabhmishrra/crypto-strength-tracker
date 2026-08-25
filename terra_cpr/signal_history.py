@@ -13,12 +13,19 @@ def _candidate_state(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
     setup = row.get("setup", {})
-    if setup.get("label") not in ALERT_LABELS:
+    # Mid-price candidates are deliberately visible in the cockpit but never
+    # enter the durable research event stream. Only a completed-bar state can
+    # activate, change, or clear a confirmed signal.
+    if (
+        setup.get("label") not in ALERT_LABELS
+        or setup.get("confirmation") != "CONFIRMED"
+    ):
         return None
     rs = row.get("rs", {})
     market = row.get("market", {})
     return {
         "label": setup.get("label"), "direction": setup.get("direction"),
+        "confirmation": setup.get("confirmation"),
         "strength": setup.get("strength"), "score": rs.get("score"),
         "reasons": setup.get("reasons", []),
         "cpr_position": market.get("price_cpr_position"),

@@ -1,4 +1,4 @@
-# Terra CPR research cockpit
+# Strength Tracker research cockpit
 
 The dashboard is a **local research cockpit**, not a trading control plane. It binds only
 to `127.0.0.1`, exposes read-only `GET` endpoints, and has no account, execution, or
@@ -11,9 +11,10 @@ python3 -m terra_cpr.cli serve --output output --live       # and keep it curren
 
 ## What counts as a pushed signal
 
-Only `LONG_CANDIDATE` and `SHORT_CANDIDATE` states create an alert event. `WATCH` means
-the relative-strength regime exists but the CPR/pivot structure has not confirmed;
-`NEUTRAL` and `INSUFFICIENT_DATA` never alert.
+Only `CONFIRMED LONG_CANDIDATE` and `CONFIRMED SHORT_CANDIDATE` states create an alert
+event. A `PROVISIONAL` candidate means the current mid is beyond structure while the last
+completed close is not; it is an early preview and never enters history. `WATCH`,
+`NEUTRAL`, and `INSUFFICIENT_DATA` never alert.
 
 An event is recorded only when a candidate first appears, changes side/type, or clears.
 Re-running a scan with an unchanged candidate does not spam the history. A "signal" is
@@ -29,7 +30,7 @@ with its threshold marked — at every scale.
 | **Cross-section** | relative strength (x) against ATR distance from the CPR band (y). The shaded corners are the candidate regions; the dashed rails are the thresholds. |
 | **Structure track** | signed ATR distance from the band. The aqua block at the centre is the band drawn at its true ATR width, so a `tight` regime is a sliver and a `wide` one a slab. The hollow ring is the session open. |
 | **Pivot ladder** | all nine levels on an ATR axis, with each level's price. Upright only in the detail drawer, where it has the height to earn the geometry. |
-| **Horizon bars** | residual z at 4h / 24h / 168h on a shared ±3σ axis, matching the `/3` normalisation the score itself applies. |
+| **Horizon bars** | current 4h / 24h / 7d factor-adjusted return in empirical robust units on a shared ±3R axis. `R` is based on the token's rolling-horizon MAD scale, not Gaussian sigma. |
 
 Two encodings carry meaning beyond colour:
 
@@ -64,6 +65,10 @@ produced a label travels with it — never hardcoded in the page.
 
 The dashboard never recomputes or reinterprets a label. Every value is read from
 `scanner_latest.json` as the scanner wrote it.
+
+The detail drawer also shows impact spread, a relative-notional proxy, funding, open
+interest, and market breadth under **Research context · excluded from score**. Their
+visibility is for event slicing and data-quality inspection, not confirmation stacking.
 
 ## Routes
 

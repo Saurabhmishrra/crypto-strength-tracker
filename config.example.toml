@@ -8,13 +8,14 @@ realized_vol_period = 20
 width_history = 120
 
 [relative_strength]
-beta_window = 720
-min_beta_points = 240
-persistence_window = 24
+# Duration-based windows are derived from interval_seconds. At 1h they are:
+# beta_window=720, min_beta_points=240, beta_half_life_bars=168,
+# persistence_window=24, and horizons=4/24/168 bars. Leave them omitted when
+# changing timeframe so the same 30d/10d/7d/24h/4h/24h/7d durations are kept.
 min_alignment_ratio = 0.95
-short_horizon_bars = 4
-medium_horizon_bars = 24
-long_horizon_bars = 168
+min_empirical_windows = 60
+winsor_mad = 6.0
+secondary_benchmark = "ETH"
 
 [decision]
 candidate_rs_score = 3.5
@@ -25,6 +26,6 @@ candidate_persistence = 0.40
 universe_size = 60          # perps ranked by 24h notional volume; benchmark always kept
 fast_interval_seconds = 20  # mid-price refresh: moves the CPR/pivot structure leg
 settle_seconds = 30         # wait after a bar close before topping candles up
-hourly_window = 720         # bars cached per symbol; matches relative_strength.beta_window
+hourly_window = 722         # minimum cache; engine expands it for the selected timeframe
 daily_window = 140          # days cached; covers width_history plus atr_period
 min_gap_seconds = 0.12      # minimum gap between candle requests

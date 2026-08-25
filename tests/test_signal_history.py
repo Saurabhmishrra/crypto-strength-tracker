@@ -7,11 +7,14 @@ from pathlib import Path
 from terra_cpr.signal_history import append_history, read_history, signal_transitions
 
 
-def snapshot(label: str, direction: str = "LONG") -> dict:
+def snapshot(label: str, direction: str = "LONG", confirmation: str = "CONFIRMED") -> dict:
     return {
         "as_of": "2026-08-07T05:00:00+00:00",
         "rows": [{
-            "symbol": "SOL", "setup": {"label": label, "direction": direction, "strength": 70, "reasons": ["test"]},
+            "symbol": "SOL", "setup": {
+                "label": label, "direction": direction, "strength": 70,
+                "reasons": ["test"], "confirmation": confirmation,
+            },
             "rs": {"score": 5.0}, "market": {"price_cpr_position": "above_tc", "pivot_position": "above_r3"},
         }],
     }
@@ -24,6 +27,11 @@ class SignalHistoryTests(unittest.TestCase):
         self.assertEqual([event["event"] for event in signal_transitions(inactive, active)], ["activated"])
         self.assertEqual(signal_transitions(active, active), [])
         self.assertEqual([event["event"] for event in signal_transitions(active, inactive)], ["cleared"])
+
+    def test_provisional_candidate_never_enters_history(self) -> None:
+        inactive = snapshot("WATCH")
+        provisional = snapshot("LONG_CANDIDATE", confirmation="PROVISIONAL")
+        self.assertEqual(signal_transitions(inactive, provisional), [])
 
     def test_history_returns_newest_valid_events_first(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

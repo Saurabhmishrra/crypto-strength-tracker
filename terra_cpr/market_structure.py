@@ -20,7 +20,11 @@ class MarketStructureConfig:
 
 def calculate_cpr(high: float, low: float, close: float) -> CPRLevels:
     """Conventional CPR: P=(H+L+C)/3, BC=(H+L)/2, TC=2P-BC."""
-    if min(high, low, close) <= 0 or high < low:
+    if (
+        not all(math.isfinite(value) for value in (high, low, close))
+        or min(high, low, close) <= 0
+        or high < low
+    ):
         raise ValueError("invalid HLC for CPR")
     pivot = (high + low + close) / 3.0
     bc = (high + low) / 2.0
@@ -30,7 +34,11 @@ def calculate_cpr(high: float, low: float, close: float) -> CPRLevels:
 
 def calculate_floor_pivots(high: float, low: float, close: float) -> PivotLevels:
     """Conventional floor-trader pivots derived from a completed session."""
-    if min(high, low, close) <= 0 or high < low:
+    if (
+        not all(math.isfinite(value) for value in (high, low, close))
+        or min(high, low, close) <= 0
+        or high < low
+    ):
         raise ValueError("invalid HLC for pivots")
     pivot = (high + low + close) / 3.0
     return PivotLevels(
@@ -69,7 +77,13 @@ def _atr(candles: Sequence[Candle], period: int) -> Optional[float]:
             abs(current.high - previous.close),
             abs(current.low - previous.close),
         ))
-    return statistics.fmean(true_ranges[-period:])
+    # Wilder's ATR: seed with a simple period mean, then recursively smooth all
+    # later true ranges. This matches the convention traders normally mean by
+    # "ATR" and avoids silently presenting a rolling SMA of true range instead.
+    atr = statistics.fmean(true_ranges[:period])
+    for true_range in true_ranges[period:]:
+        atr = ((period - 1) * atr + true_range) / period
+    return atr
 
 
 def _realized_volatility(candles: Sequence[Candle], period: int) -> Optional[float]:
@@ -122,9 +136,11 @@ def build_market_structure(
     to the current session at ``as_of``. Passing a forming daily candle is an
     input error at the adapter boundary, not something this function guesses at.
     """
-    if price <= 0:
+    if not math.isfinite(price) or price <= 0:
         raise ValueError("price must be positive")
-    if session_open is not None and session_open <= 0:
+    if session_open is not None and (
+        not math.isfinite(session_open) or session_open <= 0
+    ):
         raise ValueError("session_open must be positive")
     daily = _validate_daily(closed_daily)
     prior, active = daily[-2], daily[-1]

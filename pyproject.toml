@@ -3,14 +3,17 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "terra-cpr"
+name = "strength-tracker"
 version = "0.1.0"
-description = "Research-first CPR and relative-strength market scanner"
+description = "Research-first beta-adjusted relative-strength and market-structure tracker"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]
+strength-tracker = "terra_cpr.cli:main"
+# Backward-compatible command name; the Python package is also intentionally
+# unchanged so existing configs and imports keep working.
 terra-cpr = "terra_cpr.cli:main"
 
 [tool.setuptools.packages.find]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -111,13 +112,31 @@ class HyperliquidPublicData:
         rows = self._post(payload)
         if not isinstance(rows, list):
             raise RuntimeError(f"unexpected candle response for {symbol}: {type(rows).__name__}")
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise RuntimeError(f"unexpected candle row for {symbol}: {type(row).__name__}")
+            if row.get("s", symbol) != symbol:
+                raise RuntimeError(
+                    f"candle response symbol mismatch: requested {symbol}, got {row.get('s')}"
+                )
+            if row.get("i", interval) != interval:
+                raise RuntimeError(
+                    f"candle response interval mismatch: requested {interval}, got {row.get('i')}"
+                )
         return sorted((parse_candle(row) for row in rows), key=lambda candle: candle.timestamp)
 
     def fetch_mids(self) -> dict[str, float]:
         rows = self._post({"type": "allMids"})
         if not isinstance(rows, dict):
             raise RuntimeError("unexpected allMids response")
-        return {symbol: float(price) for symbol, price in rows.items()}
+        mids = {symbol: float(price) for symbol, price in rows.items()}
+        invalid = [
+            symbol for symbol, price in mids.items()
+            if not math.isfinite(price) or price <= 0
+        ]
+        if invalid:
+            raise RuntimeError(f"invalid allMids price(s): {', '.join(sorted(invalid))}")
+        return mids
 
     def fetch_meta_and_contexts(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Return perp metadata and its positionally aligned market contexts."""

@@ -52,3 +52,18 @@ class MarketStructureTests(unittest.TestCase):
                 "SOL", [first, first], 100.0, None,
                 datetime(2026, 1, 3, tzinfo=UTC),
             )
+
+    def test_atr_uses_wilders_smoothing(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        daily = [
+            Candle(start + timedelta(days=0), 100, 102, 98, 100, 1),
+            Candle(start + timedelta(days=1), 100, 105, 99, 104, 1),  # TR 6
+            Candle(start + timedelta(days=2), 104, 108, 103, 107, 1),  # TR 5
+            Candle(start + timedelta(days=3), 107, 111, 105, 106, 1),  # TR 6
+            Candle(start + timedelta(days=4), 106, 110, 100, 101, 1),  # TR 10
+        ]
+        structure = build_market_structure(
+            "ALT", daily, 101, None, start + timedelta(days=5),
+            MarketStructureConfig(atr_period=3),
+        )
+        self.assertAlmostEqual(structure.atr or 0.0, 64.0 / 9.0)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import statistics
 import tempfile
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
@@ -34,16 +35,56 @@ def scan_snapshot(
             cpr["top"] = max(cpr["bc"], cpr["tc"])
             cpr["width"] = cpr["top"] - cpr["bottom"]
         payload_rows.append(payload)
+    usable_scores = [float(row.rs.score) for row in rows if row.rs.is_usable]
+    confirmed = [
+        row for row in rows
+        if row.setup.label.endswith("CANDIDATE")
+        and row.setup.confirmation == "CONFIRMED"
+    ]
+    provisional = [
+        row for row in rows
+        if row.setup.label.endswith("CANDIDATE")
+        and row.setup.confirmation == "PROVISIONAL"
+    ]
+    breadth = {
+        "usable_assets": len(usable_scores),
+        "positive_rs_ratio": (
+            sum(score > 0 for score in usable_scores) / len(usable_scores)
+            if usable_scores else None
+        ),
+        "strong_rs_ratio": (
+            sum(abs(score) >= config.candidate_rs_score for score in usable_scores)
+            / len(usable_scores)
+            if usable_scores else None
+        ),
+        "median_rs_score": statistics.median(usable_scores) if usable_scores else None,
+        "confirmed_candidates": len(confirmed),
+        "provisional_candidates": len(provisional),
+    }
     # The thresholds travel with the labels they produced. A snapshot that records
     # WATCH without recording the rule that made it WATCH cannot be audited later,
     # and a reader has no way to draw the gate it missed.
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "as_of": as_of.isoformat(),
         "gates": {
             "candidate_rs_score": config.candidate_rs_score,
             "candidate_persistence": config.candidate_persistence,
+            "bar_interval_seconds": config.interval_seconds,
+            "short_horizon_seconds": (
+                config.rs.short_horizon_bars * config.interval_seconds
+            ),
+            "medium_horizon_seconds": (
+                config.rs.medium_horizon_bars * config.interval_seconds
+            ),
+            "long_horizon_seconds": (
+                config.rs.long_horizon_bars * config.interval_seconds
+            ),
         },
+        "model_version": (
+            rows[0].rs.model_version if rows else "robust_ewma_empirical_v1"
+        ),
+        "breadth": breadth,
         "rows": payload_rows,
     }
 
@@ -104,14 +145,15 @@ def render_html(snapshot: dict[str, Any]) -> str:
             f"<td>{html.escape(market['cpr_regime'])}</td>"
             f"<td>{html.escape(market['pivot_position'].replace('_', ' '))}</td>"
             f"<td>{html.escape(setup['label'].replace('_', ' '))}</td>"
+            f"<td>{html.escape(setup.get('confirmation', 'NONE').lower())}</td>"
             f"<td>{html.escape(reasons)}</td>"
             "</tr>"
         )
     generated = html.escape(snapshot["as_of"])
     return f"""<!doctype html>
 <html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Terra CPR Scanner</title><style>
+<title>Strength Tracker</title><style>
 body{{background:#0b1020;color:#e5e7eb;font:14px system-ui,sans-serif;margin:0;padding:28px}} h1{{margin:0 0 6px}} p{{color:#94a3b8}} table{{width:100%;border-collapse:collapse;margin-top:22px;background:#111827}} th,td{{padding:11px;border-bottom:1px solid #243044;text-align:left}} th{{color:#93c5fd;font-size:12px;text-transform:uppercase}} .positive{{color:#4ade80;font-weight:700}} .negative{{color:#fb7185;font-weight:700}} .muted{{color:#94a3b8}}
-</style></head><body><h1>Terra CPR market scanner</h1><p>As of {generated}. Research labels only — never order instructions.</p>
-<table><thead><tr><th>Asset</th><th>RS score</th><th>CPR position</th><th>CPR width</th><th>Pivot position</th><th>Setup</th><th>Why / blocker</th></tr></thead>
+</style></head><body><h1>Strength Tracker</h1><p>CPR + beta-adjusted relative strength. As of {generated}. Research labels only — never order instructions.</p>
+<table><thead><tr><th>Asset</th><th>RS score</th><th>CPR position</th><th>CPR width</th><th>Pivot position</th><th>Setup</th><th>Confirmation</th><th>Why / blocker</th></tr></thead>
 <tbody>{''.join(table_rows)}</tbody></table></body></html>"""

@@ -36,11 +36,33 @@ Failure is an outcome, not an invitation to tune thresholds. A rejected label re
 
 | Data | Question | Test before adding to score |
 | --- | --- | --- |
+| Impact spread / liquidity | Is the candidate practically tradable at the assumed cost? | First reject infeasible events, then test whether a predeclared liquidity cohort changes H1 OOS expectancy. |
 | Relative volume | Is the move being accepted with unusual participation? | Does it improve H1 OOS conditional expectancy after controlling for RS? |
 | Funding + OI | Is persistent strength crowded or supported by fresh positioning? | Test continuation and reversion separately; signs can reverse by regime. |
 | Liquidations | Is a move mechanical/forced and therefore likely to mean-revert or continue? | Event study around liquidations, not a generic indicator. |
 | Breadth | Is RS isolated or part of a broad alt-beta move? | Does residual breadth predict whether single-name RS persists? |
 
+Test order is fixed: (1) impact spread/liquidity and relative volume, (2) funding and OI,
+then (3) market breadth. The live adapter and historical event schema collect these as
+nullable context fields, but the score does not read them. A field can be promoted only
+after it improves rolling out-of-sample results and the final untouched holdout.
+
+## Implemented research mechanics
+
+`generate_point_in_time_events` walks completed benchmark closes and rebuilds the data
+panel, volume-ranked universe, daily structure, factors, RS score, confirmation state,
+and breadth as they were knowable at that time. Candidate events are frozen before fixed
+4h/24h/3d outcomes are attached. The `backtest` CLI writes signed asset-return,
+event-time BTC-beta-adjusted, and full BTC + orthogonal-ETH residual metrics with a
+chronological train/test split.
+
+This mechanism prevents the obvious future-panel leak, but it cannot make a current
+metadata value historical. Spread, funding, and OI therefore require a genuinely
+timestamped archive or a point-in-time callback; missing historical values remain
+`null` and are never backfilled from today's state.
+
 ## Execution is not the next step
 
-The next validation is historical panel construction and event studies, followed by paper observations. A live order module must not be added merely because the scanner has a green row.
+The next validation is running the frozen generator on a broad point-in-time archive,
+then rolling folds and a final untouched holdout, followed by paper observations. A live
+order module must not be added merely because the scanner has a green row.

@@ -11,7 +11,9 @@ from terra_cpr.live import (
     LoadShedError,
     ThrottledCandleFetcher,
     UniverseError,
+    build_market_context,
     build_panel,
+    hyperliquid_interval,
     select_universe,
 )
 
@@ -54,6 +56,15 @@ class SelectUniverseTests(unittest.TestCase):
         self.assertIn("BTC", symbols)
         self.assertEqual(len(symbols), 2)
 
+    def test_required_factor_is_retained_with_the_benchmark(self):
+        symbols = select_universe(
+            _meta("BTC", "ETH", "AAA", "BBB"),
+            _ctxs(1, 2, 900, 500),
+            size=2,
+            required_symbols=("BTC", "ETH"),
+        )
+        self.assertEqual(set(symbols), {"BTC", "ETH"})
+
     def test_missing_benchmark_is_an_error(self):
         with self.assertRaises(UniverseError):
             select_universe(_meta("AAA", "BBB"), _ctxs(900, 500), size=2)
@@ -69,6 +80,10 @@ class SelectUniverseTests(unittest.TestCase):
     def test_unparseable_volume_fails_loudly(self):
         with self.assertRaises(UniverseError):
             select_universe(_meta("BTC", "AAA"), _ctxs(900, "not-a-number"), size=2)
+
+    def test_non_finite_volume_fails_loudly(self):
+        with self.assertRaises(UniverseError):
+            select_universe(_meta("BTC", "AAA"), _ctxs(900, "NaN"), size=2)
 
 
 class CandleCacheTests(unittest.TestCase):
@@ -112,6 +127,16 @@ class CandleCacheTests(unittest.TestCase):
 
     def test_unknown_symbol_returns_no_bars(self):
         self.assertEqual(CandleCache(window=10).get("NOPE"), [])
+
+
+class IntervalMappingTests(unittest.TestCase):
+    def test_supported_seconds_map_to_the_provider_interval(self):
+        self.assertEqual(hyperliquid_interval(900), "15m")
+        self.assertEqual(hyperliquid_interval(3600), "1h")
+
+    def test_unsupported_live_interval_fails_loudly(self):
+        with self.assertRaises(ValueError):
+            hyperliquid_interval(600)
 
 
 def _day(index: int, open_price: float = 100.0) -> Candle:
@@ -176,6 +201,23 @@ class BuildPanelTests(unittest.TestCase):
     def test_missing_benchmark_mid_is_an_error(self):
         with self.assertRaises(UniverseError):
             self._panel(mids={})
+
+    def test_market_context_normalises_research_only_inputs(self):
+        context = build_market_context(
+            {
+                "dayNtlVlm": "500000",
+                "funding": "0.0001",
+                "openInterest": "10000",
+                "midPx": "100",
+                "impactPxs": ["99.9", "100.1"],
+            },
+            [_day(index) for index in range(25)],
+        )
+        self.assertEqual(context.source, "hyperliquid_metaAndAssetCtxs")
+        self.assertAlmostEqual(context.funding_rate or 0.0, 0.0001)
+        self.assertAlmostEqual(context.open_interest or 0.0, 10000.0)
+        self.assertAlmostEqual(context.impact_spread_bps or 0.0, 20.0)
+        self.assertIsNotNone(context.relative_notional_volume)
 
 
 class _FakeClock:
@@ -320,10 +362,29 @@ class LiveScannerTests(unittest.TestCase):
         import json
         return json.loads((self.output / "scanner_latest.json").read_text())
 
+    def test_cache_keeps_enough_closes_for_the_requested_beta_window(self):
+        self.assertEqual(self.scanner.hourly.window, self.scanner.scanner_config.rs.beta_window + 2)
+
+    def test_live_timeframe_fails_when_provider_history_cannot_cover_model(self):
+        from terra_cpr.live import LiveConfig, LiveScanner
+        from terra_cpr.relative_strength import RSConfig
+        from terra_cpr.scanner import ScannerConfig
+
+        with self.assertRaisesRegex(ValueError, "most recent 5000"):
+            LiveScanner(
+                output_dir=self.output,
+                source=self.source,
+                scanner_config=ScannerConfig(
+                    interval_seconds=300,
+                    rs=RSConfig.for_interval(300),
+                ),
+                live_config=LiveConfig(universe_size=3),
+            )
+
     def test_tick_writes_a_snapshot_with_a_row_per_non_benchmark_asset(self):
         self.scanner.tick(self.as_of, refresh_candles=True)
         snapshot = self._snapshot()
-        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertEqual(snapshot["schema_version"], 3)
         self.assertEqual({row["symbol"] for row in snapshot["rows"]}, {"AAA", "BBB"})
 
     def test_snapshot_records_the_thresholds_that_produced_its_labels(self):
@@ -338,10 +399,11 @@ class LiveScannerTests(unittest.TestCase):
             sleep=self.clock.sleep, monotonic=self.clock.monotonic,
         )
         scanner.tick(self.as_of, refresh_candles=True)
-        self.assertEqual(
-            self._snapshot()["gates"],
-            {"candidate_rs_score": 6.0, "candidate_persistence": 0.7},
-        )
+        gates = self._snapshot()["gates"]
+        self.assertEqual(gates["candidate_rs_score"], 6.0)
+        self.assertEqual(gates["candidate_persistence"], 0.7)
+        self.assertEqual(gates["bar_interval_seconds"], HOUR)
+        self.assertEqual(gates["short_horizon_seconds"], 4 * HOUR)
 
     def test_cold_start_requests_a_wide_window_then_only_the_delta(self):
         self.scanner.tick(self.as_of, refresh_candles=True)

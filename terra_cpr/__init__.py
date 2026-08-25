@@ -1,4 +1,4 @@
-"""Terra CPR: research-first CPR and relative-strength market scanner."""
+"""Strength Tracker: research-first beta-adjusted RS and structure scanner."""
 
 from .market_structure import MarketStructureConfig, build_market_structure
 from .relative_strength import RSConfig, compute_relative_strength

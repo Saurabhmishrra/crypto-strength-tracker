@@ -1,4 +1,4 @@
-"""Loopback-only, read-only dashboard for Terra CPR scanner snapshots."""
+"""Loopback-only, read-only dashboard for Strength Tracker snapshots."""
 from __future__ import annotations
 
 import json
@@ -33,7 +33,7 @@ def dashboard_html() -> str:
     """
     return r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Terra CPR</title><style>
+<title>Strength Tracker</title><style>
 :root{
   --void:#08090C; --panel:#0F1116; --panel2:#14171E; --rail:#1E222B; --rail2:#2A2F3A;
   --ink:#E6E8EE; --dim:#838A9B; --faint:#565D6E;
@@ -165,11 +165,11 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style></head><body>
 <header class="rail"><div class="rail-in">
-  <div class="brand"><b>Terra CPR</b><span>research cockpit</span></div>
+  <div class="brand"><b>Strength Tracker</b><span>CPR + beta-adjusted RS</span></div>
   <div class="stat"><u>Feed</u><b class="loop"><i class="dot off" id="loopDot"></i><span id="loopText">—</span></b></div>
   <div class="stat"><u>Snapshot</u><b id="age">—</b></div>
   <div class="stat"><u>Universe</u><b id="count">—</b></div>
-  <div class="stat"><u>Candidates</u><b id="cands">—</b></div>
+  <div class="stat"><u>Confirmed / provisional</u><b id="cands">—</b></div>
   <div class="stat"><u>Quality flags</u><b id="flags">—</b></div>
   <div class="stat"><u>Next candles</u><b id="nextRefresh">—</b></div>
 </div><div class="fault" id="fault" role="alert" hidden></div></header>
@@ -178,7 +178,7 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
   <section class="board">
     <div class="panel">
       <h2>Cross-section</h2>
-      <p class="hint">Relative strength against price acceptance. Shaded corners are the candidate regions; a hollow dot has not cleared the persistence gate.</p>
+      <p class="hint">Relative strength against current price location. Shaded corners are the candidate regions; a hollow dot has not cleared the persistence gate.</p>
       <figure><div id="map"></div></figure>
       <div class="legend">
         <span><i style="background:var(--long)"></i>Long candidate</span>
@@ -194,7 +194,7 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
       <div class="funnel" id="funnel"></div>
       <p class="binding" id="binding"></p>
       <h2 style="margin-top:22px">Signal queue</h2>
-      <p class="hint">Only these two states raise an alert.</p>
+      <p class="hint">Only completed-bar confirmations enter alerts and history.</p>
       <div id="queue"></div>
       <h2 style="margin-top:18px">Transitions</h2>
       <p class="hint">Activated, changed, or cleared — never a refresh.</p>
@@ -210,6 +210,8 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
       <button data-filter="ALL" aria-pressed="true">All</button>
       <button data-filter="LONG_CANDIDATE" aria-pressed="false">Long</button>
       <button data-filter="SHORT_CANDIDATE" aria-pressed="false">Short</button>
+      <button data-filter="CONFIRMED" aria-pressed="false">Confirmed</button>
+      <button data-filter="PROVISIONAL" aria-pressed="false">Provisional</button>
       <button data-filter="WATCH" aria-pressed="false">Watch</button>
       <button data-filter="FLAGGED" aria-pressed="false">Flagged</button>
     </div>
@@ -263,7 +265,9 @@ function until(iso){
    so a non-default config draws its own gates rather than these. */
 let RS_GATE = 3.5, P_GATE = 0.40;
 const rows = () => (snap && snap.rows) || [];
-const scored = () => rows().filter(r => r.rs.score != null);
+const scored = () => rows().filter(r =>
+  r.rs.score != null && !(r.rs.quality_flags || []).includes('stale_or_misaligned')
+);
 /* Signed distance from the CPR band in ATR units. P is the exact midpoint of the
    band (TC = 2P - BC), so leaving the band on one side already satisfies the
    pivot leg of the rule: this single axis is the whole structure gate. */
@@ -288,6 +292,7 @@ const passStructure = r => r.market.price_cpr_position !== 'inside_cpr';
 const weakBeta = r => (r.rs.quality_flags || []).includes('low_beta_fit');
 function tone(r){
   const l = r.setup.label;
+  if (r.setup.confirmation === 'PROVISIONAL') return 'blocked';
   return l === 'LONG_CANDIDATE' ? 'long' : l === 'SHORT_CANDIDATE' ? 'short' : l === 'WATCH' ? 'blocked' : 'dimmed';
 }
 const colourOf = r => 'var(--' + ({ long: 'long', short: 'short', blocked: 'blocked', dimmed: 'faint' })[tone(r)] + ')';
@@ -336,7 +341,7 @@ function showTip(e, symbol){
   const t = $('tip');
   t.innerHTML = `<b>${esc(r.symbol)}</b><div>RS ${n(r.rs.score)} &middot; persistence ${n(r.rs.persistence)}</div>
     <div>${words(r.market.price_cpr_position)} &middot; ${n(bandATR(r))} ATR</div>
-    <div class="${tone(r)}">${words(r.setup.label)}</div>`;
+    <div class="${tone(r)}">${words(r.setup.confirmation || '')} ${words(r.setup.label)}</div>`;
   t.dataset.show = 'true';
   const b = e.target.getBoundingClientRect();
   t.style.left = Math.min(window.innerWidth - t.offsetWidth - 10, b.left + 14) + 'px';
@@ -470,13 +475,17 @@ function renderFunnel(){
 
 /* ---------- queue and feed ---------- */
 function renderQueue(){
-  const q = rows().filter(r => r.setup.label.endsWith('CANDIDATE'));
-  $('queue').innerHTML = q.length ? q.map(r => `
+  const confirmed = rows().filter(r => r.setup.label.endsWith('CANDIDATE') && r.setup.confirmation === 'CONFIRMED');
+  const provisional = rows().filter(r => r.setup.label.endsWith('CANDIDATE') && r.setup.confirmation === 'PROVISIONAL');
+  const cards = q => q.map(r => `
     <article class="card ${esc(r.setup.direction)}">
-      <div class="card-h"><b>${esc(r.symbol)}</b><span class="tag ${tone(r)}">${words(r.setup.label)}</span></div>
+      <div class="card-h"><b>${esc(r.symbol)}</b><span class="tag ${tone(r)}">${words(r.setup.confirmation)} ${words(r.setup.label)}</span></div>
       <div class="dimmed">RS ${n(r.rs.score)} &middot; persistence ${n(r.rs.persistence)} &middot; strength ${n(r.setup.strength, 0)}</div>
       <ul class="why prose">${(r.setup.reasons || []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>
-    </article>`).join('')
+    </article>`).join('');
+  $('queue').innerHTML = confirmed.length || provisional.length
+    ? `${confirmed.length ? '<p class="hint">Completed-bar confirmations</p>' + cards(confirmed) : ''}
+       ${provisional.length ? '<p class="hint">Mid-price previews — no alert/history event</p>' + cards(provisional) : ''}`
     : `<p class="empty prose">No asset clears every gate. Watch labels and near misses are visible in the cross-section.</p>`;
 }
 function renderFeed(){
@@ -492,7 +501,10 @@ function renderFeed(){
 function visible(){
   const q = $('q').value.trim().toLowerCase();
   return rows().filter(r => {
-    if (filter === 'FLAGGED' ? !(r.rs.quality_flags || []).length : filter !== 'ALL' && r.setup.label !== filter) return false;
+    if (filter === 'FLAGGED' ? !(r.rs.quality_flags || []).length
+      : filter === 'CONFIRMED' ? r.setup.confirmation !== 'CONFIRMED'
+      : filter === 'PROVISIONAL' ? r.setup.confirmation !== 'PROVISIONAL'
+      : filter !== 'ALL' && r.setup.label !== filter) return false;
     return !q || r.symbol.toLowerCase().includes(q);
   }).sort((a, b) => {
     const get = r => sort === 'symbol' ? r.symbol
@@ -514,7 +526,7 @@ function renderTable(){
       <td>${track(r.rs.persistence, P_GATE, 1)}<span class="rank">${n(r.rs.persistence)}</span></td>
       <td><span class="${r.market.cpr_regime === 'wide' ? 'blocked' : ''}">${esc(r.market.cpr_regime)}</span>
           <span class="rank">${r.market.cpr_width_percentile == null ? '&mdash;' : Math.round(r.market.cpr_width_percentile * 100) + 'pct'}</span></td>
-      <td><span class="tag ${tone(r)}">${words(r.setup.label)}</span>
+      <td><span class="tag ${tone(r)}">${r.setup.confirmation && r.setup.confirmation !== 'NONE' ? words(r.setup.confirmation) + ' ' : ''}${words(r.setup.label)}</span>
           ${(r.rs.quality_flags || []).length ? `<span class="rank blocked"> ${(r.rs.quality_flags || []).length} flag</span>` : ''}</td>
     </tr>`).join('')
     : `<tr><td colspan="6" class="empty prose">Nothing matches this filter.</td></tr>`;
@@ -527,11 +539,12 @@ function renderTable(){
 /* ---------- detail drawer ---------- */
 function horizons(rs){
   /* Plot inset from the frame so a clamped bar's value label stays inside it.
-     The +/-3 sigma range mirrors the /3 normalisation the score itself applies. */
+     The +/-3 robust-unit range mirrors the /3 normalisation the score applies.
+     These are empirical MAD-scaled horizon sums, not Gaussian sigma claims. */
   const W = 258, H = 76, rowH = 22, max = 3, X0 = 46, X1 = 214;
   const at = v => X0 + (Math.max(-max, Math.min(max, v)) + max) / (2 * max) * (X1 - X0);
   const p = [`<line x1="${at(0)}" y1="6" x2="${at(0)}" y2="${H - 8}" stroke="var(--faint)" stroke-width="1"/>`];
-  for (const g of [-max, max]) p.push(`<text x="${at(g)}" y="${H - 1}" fill="var(--faint)" font-size="8" text-anchor="middle">${g > 0 ? '+' : ''}${g}&sigma;</text>`);
+  for (const g of [-max, max]) p.push(`<text x="${at(g)}" y="${H - 1}" fill="var(--faint)" font-size="8" text-anchor="middle">${g > 0 ? '+' : ''}${g}R</text>`);
   ['short', 'medium', 'long'].forEach((key, i) => {
     const v = (rs.horizon_z || {})[key], cy = 14 + i * rowH;
     p.push(`<text x="0" y="${cy + 3}" fill="var(--faint)" font-size="8.5" letter-spacing=".6">${key.toUpperCase()}</text>`);
@@ -544,6 +557,14 @@ function horizons(rs){
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" style="opacity:${(rs.quality_flags || []).includes('low_beta_fit') ? 0.34 : 1}">${p.join('')}</svg>`;
 }
 
+function horizonDetails(rs){
+  return ['short', 'medium', 'long'].map(key => {
+    const excess = (rs.horizon_excess_return || {})[key];
+    const percentile = (rs.horizon_percentile || {})[key];
+    return `<div class="kv"><span>${key} excess / percentile</span><b>${excess == null ? '&mdash;' : (excess * 100).toFixed(2) + '%'} &middot; ${percentile == null ? '&mdash;' : Math.round(percentile * 100) + 'pct'}</b></div>`;
+  }).join('');
+}
+
 /* ---------- which gate is actually stopping this asset ----------
    assess_setup records a blocker for the structure leg only, so an asset held
    back purely by persistence arrives with an empty blockers list. These three
@@ -551,7 +572,13 @@ function horizons(rs){
    not re-derive the label, which is read from the snapshot as written. */
 function gateVerdict(r){
   if (r.rs.score == null || r.rs.persistence == null) return '';
-  const dir = r.rs.score >= 0 ? 1 : -1, pos = r.market.price_cpr_position;
+  const dir = r.rs.score >= 0 ? 1 : -1;
+  const confirmationPrice = r.setup.confirmation === 'CONFIRMED' ? r.setup.confirmation_price : r.market.price;
+  const cpr = r.market.active_cpr || {}, pivot = (r.market.pivots || {}).pivot;
+  const pos = confirmationPrice == null ? 'unknown'
+    : confirmationPrice > cpr.top && confirmationPrice > pivot ? 'above_tc'
+    : confirmationPrice < cpr.bottom && confirmationPrice < pivot ? 'below_bc'
+    : 'inside_cpr';
   const checks = [
     ['Relative strength', Math.abs(r.rs.score) >= RS_GATE, `${n(r.rs.score)} vs ${dir > 0 ? '' : '-'}${n(RS_GATE)}`],
     ['Persistence', Math.sign(r.rs.persistence) === dir && Math.abs(r.rs.persistence) >= P_GATE, `${n(r.rs.persistence)} vs ${dir > 0 ? '' : '-'}${n(P_GATE)}`],
@@ -564,11 +591,12 @@ function gateVerdict(r){
 function open(symbol){
   const r = rows().find(x => x.symbol === symbol); if (!r) return;
   selected = symbol;
-  const m = r.market, rs = r.rs, b = rs.beta || {}, d = m.level_distances_atr || {};
+  const m = r.market, rs = r.rs, b = rs.beta || {}, cx = r.context || {}, d = m.level_distances_atr || {};
   $('drawer').innerHTML = `
     <div class="drawer-h">
       <div><h3 id="dTitle">${esc(r.symbol)}</h3>
         <span class="tag ${tone(r)}">${words(r.setup.label)}</span>
+        <span class="dimmed"> ${words(r.setup.confirmation || 'NONE')}</span>
         <span class="dimmed"> ${price(r.price)}</span></div>
       <button class="close" id="closeBtn" aria-label="Close">&times;</button>
     </div>
@@ -580,14 +608,20 @@ function open(symbol){
         <div class="kv"><span>CPR band</span><b>${d.TC == null || d.BC == null ? '&mdash;' : n(Math.abs(d.BC - d.TC), 2) + ' ATR wide'}</b></div>
       </div>
       <div>
-        <div class="sub">Relative strength &middot; residual z by horizon</div>
+        <div class="sub">Relative strength &middot; empirical robust units</div>
         ${horizons(rs)}
+        ${horizonDetails(rs)}
         ${(rs.quality_flags || []).includes('low_beta_fit') ? `<p class="hint">Faded because the beta fit is weak — these residuals carry little information.</p>` : ''}
         <div class="sub">Gates &middot; ${r.rs.score >= 0 ? 'long' : 'short'} side</div>
         ${gateVerdict(r)}
+        <div class="kv"><span>Confirmation close</span><b>${price(r.setup.confirmation_price)}</b></div>
         <div class="kv"><span>Acceleration</span><b>${n(rs.acceleration)}</b></div>
         <div class="sub">Beta fit vs ${esc(rs.benchmark)}</div>
         <div class="kv"><span>Beta</span><b>${n(b.beta)}</b></div>
+        <div class="kv"><span>Beta uncertainty</span><b>${n(b.beta_standard_error, 3)}</b></div>
+        <div class="kv"><span>Secondary factor</span><b>${b.secondary_benchmark ? esc(b.secondary_benchmark) + ' &beta; ' + n(b.secondary_beta) + ' &plusmn; ' + n(b.secondary_beta_standard_error, 3) : '&mdash;'}</b></div>
+        <div class="kv"><span>Secondary vs BTC beta</span><b>${n(b.secondary_primary_beta)}</b></div>
+        <div class="kv"><span>Model</span><b>${words(b.method || rs.model_version)}</b></div>
         <div class="kv"><span>R&sup2;</span><b>${n(b.r_squared, 3)}</b></div>
         <div class="kv"><span>Residual vol</span><b>${n(b.residual_volatility, 5)}</b></div>
         <div class="kv"><span>Observations</span><b>${b.observations == null ? '&mdash;' : b.observations}</b></div>
@@ -598,6 +632,12 @@ function open(symbol){
         <div class="kv"><span>Opened</span><b>${m.opening_cpr_position ? words(m.opening_cpr_position) : '&mdash;'}</b></div>
         <div class="kv"><span>Pivot band</span><b>${words(m.pivot_position)}</b></div>
         <div class="kv"><span>ATR &middot; realised vol</span><b>${price(m.atr)} &middot; ${n(m.realized_volatility)}</b></div>
+        <div class="sub">Research context &middot; excluded from score</div>
+        <div class="kv"><span>Relative notional proxy</span><b>${cx.relative_notional_volume == null ? '&mdash;' : n(cx.relative_notional_volume) + '&times;'}</b></div>
+        <div class="kv"><span>Impact spread</span><b>${cx.impact_spread_bps == null ? '&mdash;' : n(cx.impact_spread_bps) + ' bps'}</b></div>
+        <div class="kv"><span>Funding</span><b>${cx.funding_rate == null ? '&mdash;' : (cx.funding_rate * 100).toFixed(4) + '%'}</b></div>
+        <div class="kv"><span>Open interest</span><b>${n(cx.open_interest, 0)}</b></div>
+        <div class="kv"><span>Positive RS breadth</span><b>${snap && snap.breadth && snap.breadth.positive_rs_ratio != null ? Math.round(snap.breadth.positive_rs_ratio * 100) + '%' : '&mdash;'}</b></div>
       </div>
     </div>
     <div class="sub">Why this label</div>
@@ -651,8 +691,9 @@ function renderHealth(){
   $('fault').hidden = !fault;
   $('age').textContent = snap ? ago(snap.as_of) : '—';
   $('count').textContent = snap ? rows().length : '—';
-  const c = rows().filter(r => r.setup.label.endsWith('CANDIDATE')).length;
-  $('cands').textContent = snap ? c : '—';
+  const confirmed = rows().filter(r => r.setup.label.endsWith('CANDIDATE') && r.setup.confirmation === 'CONFIRMED').length;
+  const provisional = rows().filter(r => r.setup.label.endsWith('CANDIDATE') && r.setup.confirmation === 'PROVISIONAL').length;
+  $('cands').textContent = snap ? confirmed + ' / ' + provisional : '—';
   const f = rows().filter(r => (r.rs.quality_flags || []).length).length;
   $('flags').innerHTML = snap ? (f ? `<span class="warn">${f}</span>` : '0') : '—';
   $('nextRefresh').textContent = status && status.next_candle_refresh ? until(status.next_candle_refresh) : '—';
@@ -800,7 +841,7 @@ def serve(output_dir: Path, port: int = 8765, live_scanner: Any = None) -> None:
         {"output_dir": output_dir, "live_scanner": live_scanner},
     )
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
-    print(f"Terra CPR dashboard: http://127.0.0.1:{port}")
+    print(f"Strength Tracker dashboard: http://127.0.0.1:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -5,15 +5,30 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from terra_cpr.config import load_scanner_config
-from terra_cpr.data import completed_bars, load_fixture, synthetic_demo_assets
+from terra_cpr.data import HyperliquidPublicData, completed_bars, load_fixture, synthetic_demo_assets
 from terra_cpr.models import Candle
-from terra_cpr.scanner import ScannerConfig, scan_assets
+from terra_cpr.scanner import ScannerConfig, _row_order, assess_setup, scan_assets
 from terra_cpr.report import scan_snapshot
 
 
 class DataAndScannerTests(unittest.TestCase):
+    def test_non_finite_candle_value_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            Candle(datetime(2026, 1, 1, tzinfo=timezone.utc), float("nan"), 101, 99, 100)
+
+    def test_provider_candle_symbol_mismatch_is_rejected(self) -> None:
+        source = HyperliquidPublicData()
+        source._post = lambda _payload: [{
+            "t": 1_767_225_600_000, "s": "ETH", "i": "1h",
+            "o": "100", "h": "101", "l": "99", "c": "100", "v": "1",
+        }]
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(RuntimeError, "symbol mismatch"):
+            source.fetch_candles("BTC", "1h", start, start + timedelta(hours=1))
+
     def test_forming_bar_is_excluded(self) -> None:
         as_of = datetime(2026, 1, 2, 1, 30, tzinfo=timezone.utc)
         closed = Candle(as_of - timedelta(hours=2), 100, 101, 99, 100)
@@ -55,6 +70,45 @@ class DataAndScannerTests(unittest.TestCase):
             path.write_text("[scanner]\ninterval_seconds = 900\n")
             with self.assertRaises(ValueError):
                 load_scanner_config(path, 3600)
+
+    def test_config_derives_duration_preserving_windows_for_15_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scanner.toml"
+            path.write_text("[scanner]\ninterval_seconds = 900\n")
+            config = load_scanner_config(path, 900)
+        self.assertEqual(config.rs.bar_interval_seconds, 900)
+        self.assertEqual(config.rs.short_horizon_bars, 16)
+        self.assertEqual(config.rs.persistence_window, 96)
+
+    def test_stale_scores_do_not_receive_cross_sectional_ranks(self) -> None:
+        as_of, interval, assets = synthetic_demo_assets()
+        rows = scan_assets(
+            assets, as_of + timedelta(hours=5), ScannerConfig(interval_seconds=interval)
+        )
+        self.assertTrue(all("stale_or_misaligned" in row.rs.quality_flags for row in rows))
+        self.assertTrue(all(row.strong_rank is None and row.weak_rank is None for row in rows))
+
+    def test_zero_score_sorts_ahead_of_negative_score(self) -> None:
+        zero = SimpleNamespace(symbol="ZERO", strong_rank=1, rs=SimpleNamespace(score=0.0))
+        negative = SimpleNamespace(symbol="NEG", strong_rank=2, rs=SimpleNamespace(score=-1.0))
+        self.assertEqual(sorted([negative, zero], key=_row_order), [zero, negative])
+
+    def test_mid_cross_is_provisional_until_a_completed_close_confirms(self) -> None:
+        market = SimpleNamespace(
+            active_cpr=SimpleNamespace(top=110.0, bottom=100.0),
+            pivots=SimpleNamespace(pivot=105.0, r1=115.0, s1=95.0),
+        )
+        rs = SimpleNamespace(is_usable=True, score=5.0, persistence=0.6)
+        provisional = assess_setup(
+            "ALT", 112.0, 109.0, market, rs, ScannerConfig(),
+            confirmed_price=108.0, confirmed_prior_price=107.0,
+        )
+        confirmed = assess_setup(
+            "ALT", 112.0, 109.0, market, rs, ScannerConfig(),
+            confirmed_price=111.0, confirmed_prior_price=108.0,
+        )
+        self.assertEqual(provisional.confirmation, "PROVISIONAL")
+        self.assertEqual(confirmed.confirmation, "CONFIRMED")
 
 
 class AtomicWriteTests(unittest.TestCase):

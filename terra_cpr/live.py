@@ -1,4 +1,4 @@
-"""Live public-market panel construction for the Terra CPR scanner.
+"""Live public-market panel construction for Strength Tracker.
 
 This module reads public Hyperliquid market data and assembles the same
 ``AssetInput`` panel the fixture adapter produces. It holds no credentials, no
@@ -7,6 +7,8 @@ signing code, and no order path, and it never mutates a scanner engine.
 from __future__ import annotations
 
 import json
+import math
+import statistics
 import threading
 import time
 from dataclasses import dataclass, field
@@ -15,17 +17,42 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from .data import completed_bars
-from .models import Candle
+from .models import Candle, MarketContext
 from .report import scan_snapshot, write_json_atomic
 from .scanner import AssetInput, ScannerConfig, scan_assets
 from .signal_history import append_history, signal_transitions
 
 DAY_SECONDS = 86_400
+MAX_PUBLIC_CANDLES = 5_000
+
+HYPERLIQUID_INTERVALS = {
+    60: "1m",
+    180: "3m",
+    300: "5m",
+    900: "15m",
+    1_800: "30m",
+    3_600: "1h",
+    7_200: "2h",
+    14_400: "4h",
+    28_800: "8h",
+    43_200: "12h",
+}
 
 #: Two completed sessions is the hard floor for a CPR: yesterday defines today's
 #: levels and the one before it is needed to place them in context. Below this,
 #: ``build_market_structure`` raises rather than guessing.
 MIN_DAILY_BARS = 2
+
+
+def hyperliquid_interval(interval_seconds: int) -> str:
+    """Map scanner bar duration to an exact Hyperliquid candle interval."""
+    try:
+        return HYPERLIQUID_INTERVALS[interval_seconds]
+    except KeyError:
+        supported = ", ".join(str(value) for value in HYPERLIQUID_INTERVALS)
+        raise ValueError(
+            f"unsupported live interval_seconds={interval_seconds}; supported values: {supported}"
+        ) from None
 
 
 class UniverseError(RuntimeError):
@@ -42,8 +69,9 @@ def select_universe(
     contexts: Sequence[Mapping[str, Any]],
     size: int,
     benchmark: str = "BTC",
+    required_symbols: Sequence[str] = (),
 ) -> list[str]:
-    """Rank tradable perps by 24h notional volume, benchmark always retained.
+    """Rank tradable perps by volume while retaining required factor markets.
 
     ``meta['universe']`` and ``contexts`` are positionally aligned lists in the
     public ``metaAndAssetCtxs`` response; that index correspondence is the only
@@ -51,6 +79,11 @@ def select_universe(
     """
     if size <= 0:
         raise UniverseError("universe size must be positive")
+    required = tuple(dict.fromkeys((benchmark, *required_symbols)))
+    if size < len(required):
+        raise UniverseError(
+            f"universe size {size} cannot retain required symbols: {', '.join(required)}"
+        )
     entries = meta.get("universe")
     if not isinstance(entries, list):
         raise UniverseError("metadata is missing a 'universe' list")
@@ -72,17 +105,32 @@ def select_universe(
             volume = float(context["dayNtlVlm"])
         except (TypeError, ValueError) as exc:
             raise UniverseError(f"unparseable 'dayNtlVlm' for {name}: {exc}") from exc
+        if not math.isfinite(volume) or volume < 0:
+            raise UniverseError(f"invalid 'dayNtlVlm' for {name}: {volume}")
         ranked.append((volume, name))
 
-    if not any(name == benchmark for _, name in ranked):
-        raise UniverseError(f"benchmark {benchmark} is absent from the tradable universe")
+    ranked_names = {name for _, name in ranked}
+    missing = [symbol for symbol in required if symbol not in ranked_names]
+    if missing:
+        raise UniverseError(
+            f"required symbol(s) absent from the tradable universe: {', '.join(missing)}"
+        )
 
     ranked.sort(key=lambda item: (-item[0], item[1]))
     selected = ranked[:size]
-    if not any(name == benchmark for _, name in selected):
-        benchmark_entry = next(item for item in ranked if item[1] == benchmark)
-        selected = selected[:-1] + [benchmark_entry]
-        selected.sort(key=lambda item: (-item[0], item[1]))
+    selected_names = {name for _, name in selected}
+    for required_symbol in required:
+        if required_symbol in selected_names:
+            continue
+        required_entry = next(item for item in ranked if item[1] == required_symbol)
+        replace_at = next(
+            index for index in range(len(selected) - 1, -1, -1)
+            if selected[index][1] not in required
+        )
+        selected_names.remove(selected[replace_at][1])
+        selected[replace_at] = required_entry
+        selected_names.add(required_symbol)
+    selected.sort(key=lambda item: (-item[0], item[1]))
     return [name for _, name in selected]
 
 
@@ -176,6 +224,57 @@ def _session_open(daily_bars: Sequence[Candle], as_of: datetime) -> Optional[flo
     return forming[-1].open if forming else None
 
 
+def _optional_finite(context: Mapping[str, Any], key: str) -> Optional[float]:
+    value = context.get(key)
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def build_market_context(
+    raw: Mapping[str, Any], completed_daily: Sequence[Candle]
+) -> MarketContext:
+    """Normalise Hyperliquid context fields without promoting them to score inputs."""
+    day_notional = _optional_finite(raw, "dayNtlVlm")
+    mid = _optional_finite(raw, "midPx")
+    impact_spread_bps = None
+    impact = raw.get("impactPxs")
+    if isinstance(impact, Sequence) and not isinstance(impact, (str, bytes)) and len(impact) == 2:
+        try:
+            bid, ask = float(impact[0]), float(impact[1])
+        except (TypeError, ValueError):
+            bid = ask = float("nan")
+        reference = mid if mid and mid > 0 else (bid + ask) / 2.0
+        if all(math.isfinite(value) for value in (bid, ask, reference)) and reference > 0 and ask >= bid:
+            impact_spread_bps = (ask - bid) / reference * 10_000.0
+
+    historical_notional = [
+        candle.volume * ((candle.high + candle.low + candle.close) / 3.0)
+        for candle in completed_daily[-20:]
+        if candle.volume > 0
+    ]
+    relative_notional = None
+    if day_notional is not None and historical_notional:
+        baseline = statistics.median(historical_notional)
+        if baseline > 0:
+            relative_notional = day_notional / baseline
+    return MarketContext(
+        source="hyperliquid_metaAndAssetCtxs",
+        day_notional_volume=day_notional,
+        relative_notional_volume=relative_notional,
+        impact_spread_bps=impact_spread_bps,
+        funding_rate=_optional_finite(raw, "funding"),
+        open_interest=_optional_finite(raw, "openInterest"),
+        premium=_optional_finite(raw, "premium"),
+        mark_price=_optional_finite(raw, "markPx"),
+        context_mid_price=mid,
+    )
+
+
 def build_panel(
     symbols: Sequence[str],
     hourly: CandleCache,
@@ -185,6 +284,7 @@ def build_panel(
     as_of: datetime,
     interval_seconds: int,
     benchmark: str = "BTC",
+    contexts: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> dict[str, AssetInput]:
     """Assemble the scanner panel from cached bars and current mid prices.
 
@@ -193,19 +293,25 @@ def build_panel(
     """
     if benchmark not in mids:
         raise UniverseError(f"no mid price for benchmark {benchmark}; cannot scan")
+    contexts = contexts or {}
     panel: dict[str, AssetInput] = {}
     for symbol in symbols:
         price = mids.get(symbol)
         if price is None:
             continue
         daily_bars = list(daily.get(symbol, ()))
+        closed_daily = completed_bars(daily_bars, DAY_SECONDS, as_of)
         panel[symbol] = AssetInput(
             symbol=symbol,
             price=float(price),
-            daily=completed_bars(daily_bars, DAY_SECONDS, as_of),
+            daily=closed_daily,
             intraday=completed_bars(hourly.get(symbol), interval_seconds, as_of),
             session_open=_session_open(daily_bars, as_of),
             prior_price=prior_prices.get(symbol),
+            context=(
+                build_market_context(contexts[symbol], closed_daily)
+                if symbol in contexts else None
+            ),
         )
     return panel
 
@@ -217,7 +323,7 @@ class LiveConfig:
     universe_size: int = 60
     fast_interval_seconds: float = 20.0
     settle_seconds: float = 30.0
-    hourly_window: int = 720
+    hourly_window: int = 722
     daily_window: int = 140
     min_gap_seconds: float = 0.12
 
@@ -243,7 +349,7 @@ class LiveScanner:
 
     The fast tier refreshes mid prices only, because the structure leg of the
     decision rule moves continuously while relative strength cannot change until
-    an hourly bar closes. The slow tier tops candles up just after each close.
+    a configured intraday bar closes. The slow tier tops candles up just after each close.
     Both tiers call the same ``scan_assets``, so the tiers cannot disagree about
     strategy logic — only about how fresh their inputs are.
     """
@@ -261,13 +367,43 @@ class LiveScanner:
         self.source = source
         self.scanner_config = scanner_config
         self.live_config = live_config
+        self._intraday_interval = hyperliquid_interval(scanner_config.interval_seconds)
+        # A beta over N returns needs N+1 completed closes. The endpoint may
+        # also return the forming bar, which the cache must retain until the
+        # completion gate removes it, so the raw store needs two extra slots.
+        self._intraday_window = max(
+            live_config.hourly_window,
+            scanner_config.rs.beta_window + 2,
+            scanner_config.rs.min_beta_points + 2,
+            scanner_config.rs.persistence_window + 2,
+            scanner_config.rs.long_horizon_bars + 2,
+            scanner_config.rs.long_horizon_bars
+            + scanner_config.rs.min_empirical_windows + 2,
+        )
+        if self._intraday_window > MAX_PUBLIC_CANDLES:
+            raise ValueError(
+                f"the configured live model needs {self._intraday_window} bars, but "
+                f"Hyperliquid candleSnapshot exposes only the most recent "
+                f"{MAX_PUBLIC_CANDLES}; use 15m or slower, shorten a preregistered "
+                "model window, or supply an archive-backed data source"
+            )
+        # The active daily observation plus its history and a forming day need
+        # the same two-slot allowance.
+        self._daily_window = max(
+            live_config.daily_window,
+            scanner_config.market.width_history + 2,
+            scanner_config.market.atr_period + 2,
+            scanner_config.market.realized_vol_period + 2,
+            MIN_DAILY_BARS + 1,
+        )
         self.fetcher = ThrottledCandleFetcher(
             source=source, min_gap_seconds=live_config.min_gap_seconds,
             sleep=sleep, monotonic=monotonic,
         )
-        self.hourly = CandleCache(window=live_config.hourly_window)
-        self.daily = CandleCache(window=live_config.daily_window)
+        self.hourly = CandleCache(window=self._intraday_window)
+        self.daily = CandleCache(window=self._daily_window)
         self.prior_prices: dict[str, float] = {}
+        self._market_contexts: dict[str, Mapping[str, Any]] = {}
         self.symbols: list[str] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -284,9 +420,31 @@ class LiveScanner:
     def _refresh_universe(self) -> list[str]:
         """Select the candidate universe. Candidates are not yet scannable."""
         meta, contexts = self.source.fetch_meta_and_contexts()
-        return select_universe(
-            meta, contexts, self.live_config.universe_size, self.scanner_config.benchmark
+        secondary = self.scanner_config.rs.secondary_benchmark
+        entries = meta.get("universe", [])
+        secondary_available = any(
+            isinstance(entry, Mapping)
+            and entry.get("name") == secondary
+            and not entry.get("isDelisted")
+            for entry in entries
         )
+        selected = select_universe(
+            meta,
+            contexts,
+            self.live_config.universe_size,
+            self.scanner_config.benchmark,
+            (
+                (secondary,)
+                if secondary and secondary_available else ()
+            ),
+        )
+        entries = meta.get("universe", [])
+        self._market_contexts = {
+            entry["name"]: context
+            for entry, context in zip(entries, contexts)
+            if isinstance(entry, Mapping) and entry.get("name") in selected
+        }
+        return selected
 
     def _refresh_candles(self, candidates: Sequence[str], as_of: datetime) -> list[str]:
         """Top candles up, then admit only the symbols the caches can support.
@@ -312,8 +470,8 @@ class LiveScanner:
             failure: Optional[str] = None
             try:
                 for cache, label, step, depth in (
-                    (self.hourly, "1h", interval, self.live_config.hourly_window),
-                    (self.daily, "1d", DAY_SECONDS, self.live_config.daily_window),
+                    (self.hourly, self._intraday_interval, interval, self._intraday_window),
+                    (self.daily, "1d", DAY_SECONDS, self._daily_window),
                 ):
                     last = cache.last_timestamp(symbol)
                     if last is None:
@@ -360,6 +518,7 @@ class LiveScanner:
                 mids=mids, prior_prices=self.prior_prices, as_of=as_of,
                 interval_seconds=self.scanner_config.interval_seconds,
                 benchmark=self.scanner_config.benchmark,
+                contexts=self._market_contexts,
             )
             rows = scan_assets(panel, as_of, self.scanner_config)
             snapshot = scan_snapshot(as_of, rows, self.scanner_config)
