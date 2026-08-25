@@ -26,6 +26,7 @@ class RSConfig:
     min_empirical_windows: int = 60
     winsor_mad: float = 6.0
     secondary_benchmark: Optional[str] = "ETH"
+    broad_alt_min_constituents: int = 5
 
     @classmethod
     def for_interval(cls, interval_seconds: int) -> "RSConfig":
@@ -58,6 +59,7 @@ class RSConfig:
             "bar_interval_seconds": self.bar_interval_seconds,
             "beta_half_life_bars": self.beta_half_life_bars,
             "min_empirical_windows": self.min_empirical_windows,
+            "broad_alt_min_constituents": self.broad_alt_min_constituents,
         }
         non_positive = [name for name, value in windows.items() if value <= 0]
         if non_positive:
@@ -465,6 +467,7 @@ def compute_relative_strength(
     config: RSConfig = RSConfig(),
     secondary_benchmark: Optional[str] = None,
     secondary_bars: Sequence[Candle] = (),
+    secondary_factor_constituents: Optional[int] = None,
 ) -> RelativeStrength:
     """Compute a quality-aware, multi-horizon beta-adjusted RS score.
 
@@ -616,6 +619,11 @@ def compute_relative_strength(
         alignment_ratio=alignment_ratio, quality_flags=tuple(flags), reason=reason,
         horizon_excess_return=horizon_returns,
         horizon_percentile=horizon_percentiles,
-        model_version="robust_ewma_empirical_discovery_v2",
+        model_version=(
+            "robust_ewma_empirical_discovery_v2+broad_alt_l1o"
+            if secondary_benchmark == "BROAD_ALT_L1O"
+            else "robust_ewma_empirical_discovery_v2"
+        ),
         discovery_score=discovery_score,
+        secondary_factor_constituents=secondary_factor_constituents,
     )

@@ -3,12 +3,52 @@ from __future__ import annotations
 
 import math
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 from .models import Candle, MarketContext
-from .scanner import AssetInput, ScannerConfig, scan_assets
+from .scanner import (
+    BROAD_ALT_FACTOR,
+    AssetInput,
+    ScannerConfig,
+    scan_assets,
+)
+
+
+CURRENT_FACTOR_MODEL = "btc_eth"
+BROAD_ALT_FACTOR_MODEL = "btc_broad_alt"
+
+
+@dataclass(frozen=True)
+class ResearchSpecification:
+    spec_id: str
+    label: str
+    event_rule: str
+    factor_model: str
+
+
+FIVE_MODEL_COMPARISON = (
+    ResearchSpecification(
+        "H1", "Frozen H1", "confirmed_candidate", CURRENT_FACTOR_MODEL
+    ),
+    ResearchSpecification(
+        "D1", "Persistence-free discovery", "strong_discovery",
+        CURRENT_FACTOR_MODEL,
+    ),
+    ResearchSpecification(
+        "H5", "Discovery plus completed structure", "h5_discovery_structure",
+        CURRENT_FACTOR_MODEL,
+    ),
+    ResearchSpecification(
+        "B1", "24h residual-momentum baseline", "residual_momentum_baseline",
+        CURRENT_FACTOR_MODEL,
+    ),
+    ResearchSpecification(
+        "H6", "H5 with BTC plus broad-alt factor", "h5_discovery_structure",
+        BROAD_ALT_FACTOR_MODEL,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +67,7 @@ class EventOutcome:
     model_factor_adjusted_forward_log_return: float | None = None
     features: Mapping[str, float | None] = field(default_factory=dict)
     event_rule: str = "confirmed_candidate"
+    factor_model: str = CURRENT_FACTOR_MODEL
 
     @property
     def signed_gross_return(self) -> float:
@@ -86,6 +127,80 @@ def _completed_structure_side(row) -> str:
     if price < row.market.active_cpr.bottom and price < row.market.pivots.pivot:
         return "SHORT"
     return "NONE"
+
+
+def _config_for_factor_model(
+    scanner_config: ScannerConfig, factor_model: str
+) -> ScannerConfig:
+    if factor_model == CURRENT_FACTOR_MODEL:
+        return replace(
+            scanner_config,
+            rs=replace(scanner_config.rs, secondary_benchmark="ETH"),
+        )
+    if factor_model == BROAD_ALT_FACTOR_MODEL:
+        return replace(
+            scanner_config,
+            rs=replace(scanner_config.rs, secondary_benchmark=BROAD_ALT_FACTOR),
+        )
+    raise ValueError(f"unknown factor_model {factor_model}")
+
+
+def _residual_momentum_percentiles(rows) -> dict[str, float]:
+    """Average-rank percentiles of completed 24h model residual returns."""
+    values = sorted(
+        (
+            float(row.rs.horizon_excess_return["medium"]),
+            row.symbol,
+        )
+        for row in rows
+        if row.rs.is_usable
+        and row.rs.horizon_excess_return.get("medium") is not None
+    )
+    if len(values) < 2:
+        return {}
+    output: dict[str, float] = {}
+    index = 0
+    while index < len(values):
+        stop = index + 1
+        while stop < len(values) and values[stop][0] == values[index][0]:
+            stop += 1
+        average_rank = (index + stop - 1) / 2.0
+        percentile = average_rank / (len(values) - 1)
+        for _value, symbol in values[index:stop]:
+            output[symbol] = percentile
+        index = stop
+    return output
+
+
+def _broad_alt_forward_log_return(
+    closes_by_symbol: Mapping[str, Mapping[datetime, float]],
+    constituents: Sequence[str],
+    target: str,
+    entry_open: datetime,
+    exit_open: datetime,
+    step_seconds: int,
+    min_constituents: int,
+) -> Optional[float]:
+    """Forward return of the entry-time leave-one-out equal-weight alt factor."""
+    total = 0.0
+    timestamp = entry_open + timedelta(seconds=step_seconds)
+    step = timedelta(seconds=step_seconds)
+    while timestamp <= exit_open:
+        previous = timestamp - step
+        returns = []
+        for symbol in constituents:
+            if symbol == target:
+                continue
+            by_time = closes_by_symbol.get(symbol, {})
+            prior_close = by_time.get(previous)
+            current_close = by_time.get(timestamp)
+            if prior_close is not None and current_close is not None:
+                returns.append(math.log(current_close / prior_close))
+        if len(returns) < min_constituents:
+            return None
+        total += statistics.fmean(returns)
+        timestamp += step
+    return total
 
 
 def _bars_closed_by(
@@ -150,14 +265,15 @@ def _select_point_in_time_universe(
     return selected
 
 
-def generate_point_in_time_events(
+def _generate_point_in_time_events_for_rules(
     assets: Mapping[str, AssetInput],
     scanner_config: ScannerConfig,
     horizon_bars: int,
     universe_size: Optional[int] = None,
     context_at: Optional[ContextAt] = None,
     funding_cost: Optional[FundingCost] = None,
-    event_rule: str = "confirmed_candidate",
+    event_rules: Sequence[str] = ("confirmed_candidate",),
+    factor_model: str = CURRENT_FACTOR_MODEL,
 ) -> list[EventOutcome]:
     """Generate completed-close rule activations without future leakage.
 
@@ -170,22 +286,32 @@ def generate_point_in_time_events(
     """
     if horizon_bars <= 0:
         raise ValueError("horizon_bars must be positive")
-    if event_rule not in {
+    allowed_rules = {
         "confirmed_candidate", "early_discovery", "strong_discovery",
-        "h5_discovery_structure",
-    }:
-        raise ValueError(f"unknown event_rule {event_rule}")
-    benchmark = assets.get(scanner_config.benchmark)
+        "h5_discovery_structure", "residual_momentum_baseline",
+    }
+    if not event_rules:
+        raise ValueError("event_rules must not be empty")
+    unknown_rules = sorted(set(event_rules).difference(allowed_rules))
+    if unknown_rules:
+        raise ValueError(f"unknown event_rule {unknown_rules[0]}")
+    effective_config = _config_for_factor_model(scanner_config, factor_model)
+    benchmark = assets.get(effective_config.benchmark)
     if benchmark is None:
-        raise ValueError(f"benchmark {scanner_config.benchmark} is missing")
-    step = scanner_config.interval_seconds
+        raise ValueError(f"benchmark {effective_config.benchmark} is missing")
+    step = effective_config.interval_seconds
     benchmark_bars = sorted(benchmark.intraday, key=lambda candle: candle.timestamp)
     closes_by_symbol = {
         symbol: {candle.timestamp: candle.close for candle in asset.intraday}
         for symbol, asset in assets.items()
     }
-    pending: list[tuple[datetime, str, str, float, float, Mapping[str, float | None]]] = []
-    prior_states: dict[str, tuple[str, str]] = {}
+    pending: list[tuple[
+        str, datetime, str, str, float, float,
+        Mapping[str, float | None], tuple[str, ...]
+    ]] = []
+    prior_states: dict[str, dict[str, tuple[str, str]]] = {
+        event_rule: {} for event_rule in event_rules
+    }
 
     for benchmark_index in range(0, max(0, len(benchmark_bars) - horizon_bars)):
         bar = benchmark_bars[benchmark_index]
@@ -209,97 +335,148 @@ def generate_point_in_time_events(
                 prior_price=intraday[-2].close if len(intraday) >= 2 else None,
                 context=context,
             )
-        required = [scanner_config.benchmark]
-        secondary = scanner_config.rs.secondary_benchmark
-        if secondary and secondary in panel:
+        required = [effective_config.benchmark]
+        secondary = effective_config.rs.secondary_benchmark
+        if secondary and secondary != BROAD_ALT_FACTOR and secondary in panel:
             required.append(secondary)
-        if scanner_config.benchmark not in panel:
+        if effective_config.benchmark not in panel:
             continue
         selected = _select_point_in_time_universe(panel, universe_size, required)
-        rows = scan_assets(selected, as_of, scanner_config)
+        rows = scan_assets(selected, as_of, effective_config)
         usable_scores = [float(row.rs.score) for row in rows if row.rs.is_usable]
         positive_breadth = (
             sum(score > 0 for score in usable_scores) / len(usable_scores)
             if usable_scores else None
         )
-        current_states: dict[str, tuple[str, str]] = {}
-        for row in rows:
-            if event_rule == "confirmed_candidate":
+        momentum_percentiles = _residual_momentum_percentiles(rows)
+        factor_constituents = tuple(sorted(
+            symbol for symbol in selected
+            if symbol != effective_config.benchmark
+        ))
+        for event_rule in event_rules:
+            current_states: dict[str, tuple[str, str]] = {}
+            for row in rows:
                 if (
-                    not row.setup.label.endswith("CANDIDATE")
-                    or row.setup.confirmation != "CONFIRMED"
+                    factor_model == BROAD_ALT_FACTOR_MODEL
+                    and (
+                        row.rs.beta is None
+                        or row.rs.beta.secondary_benchmark != BROAD_ALT_FACTOR
+                        or row.rs.beta.secondary_beta is None
+                    )
                 ):
                     continue
-                direction = row.setup.direction
-                trigger_score = row.rs.score
-                state = (row.setup.label, direction)
-            else:
-                trigger_score = row.rs.discovery_score
-                threshold = (
-                    scanner_config.early_discovery_score
-                    if event_rule == "early_discovery"
-                    else scanner_config.strong_discovery_score
-                )
-                if trigger_score is None or abs(trigger_score) < threshold:
+                if event_rule == "confirmed_candidate":
+                    if (
+                        not row.setup.label.endswith("CANDIDATE")
+                        or row.setup.confirmation != "CONFIRMED"
+                    ):
+                        continue
+                    direction = row.setup.direction
+                    trigger_score = row.rs.score
+                    state = (row.setup.label, direction)
+                elif event_rule == "residual_momentum_baseline":
+                    percentile = momentum_percentiles.get(row.symbol)
+                    residual_return = row.rs.horizon_excess_return.get("medium")
+                    trigger_score = row.rs.horizon_z.get("medium")
+                    if (
+                        percentile is None or residual_return is None
+                        or trigger_score is None
+                    ):
+                        continue
+                    if percentile >= 0.80 and residual_return > 0:
+                        direction = "LONG"
+                    elif percentile <= 0.20 and residual_return < 0:
+                        direction = "SHORT"
+                    else:
+                        continue
+                    state = (event_rule, direction)
+                else:
+                    trigger_score = row.rs.discovery_score
+                    threshold = (
+                        scanner_config.early_discovery_score
+                        if event_rule == "early_discovery"
+                        else scanner_config.strong_discovery_score
+                    )
+                    if trigger_score is None or abs(trigger_score) < threshold:
+                        continue
+                    direction = "LONG" if trigger_score > 0 else "SHORT"
+                    if (
+                        event_rule == "h5_discovery_structure"
+                        and _completed_structure_side(row) != direction
+                    ):
+                        continue
+                    state = (event_rule, direction)
+                current_states[row.symbol] = state
+                if prior_states[event_rule].get(row.symbol) == state:
                     continue
-                direction = "LONG" if trigger_score > 0 else "SHORT"
-                if (
-                    event_rule == "h5_discovery_structure"
-                    and _completed_structure_side(row) != direction
-                ):
-                    continue
-                state = (event_rule, direction)
-            current_states[row.symbol] = state
-            if prior_states.get(row.symbol) == state:
-                continue
-            context = row.context
-            features: dict[str, float | None] = {
-                "rs_score": row.rs.score,
-                "discovery_score": row.rs.discovery_score,
-                "persistence": row.rs.persistence,
-                "acceleration": row.rs.acceleration,
-                "beta": row.rs.beta.beta if row.rs.beta else None,
-                "beta_standard_error": (
-                    row.rs.beta.beta_standard_error if row.rs.beta else None
-                ),
-                "secondary_beta": row.rs.beta.secondary_beta if row.rs.beta else None,
-                "secondary_primary_beta": (
-                    row.rs.beta.secondary_primary_beta if row.rs.beta else None
-                ),
-                "beta_r_squared": row.rs.beta.r_squared if row.rs.beta else None,
-                "cpr_width_percentile": row.market.cpr_width_percentile,
-                "relative_notional_volume": (
-                    context.relative_notional_volume if context else None
-                ),
-                "day_notional_volume": context.day_notional_volume if context else None,
-                "impact_spread_bps": context.impact_spread_bps if context else None,
-                "funding_rate": context.funding_rate if context else None,
-                "open_interest": context.open_interest if context else None,
-                "positive_rs_breadth": positive_breadth,
-                "completed_structure": (
-                    1.0 if _completed_structure_side(row) == direction else 0.0
-                ),
-                "trigger_threshold": (
-                    scanner_config.candidate_rs_score
-                    if event_rule == "confirmed_candidate"
-                    else scanner_config.early_discovery_score
-                    if event_rule == "early_discovery"
-                    else scanner_config.strong_discovery_score
-                ),
-            }
-            pending.append((
-                as_of, row.symbol, direction, row.price,
-                float(trigger_score), features,
-            ))
-        prior_states = current_states
+                context = row.context
+                features: dict[str, float | None] = {
+                    "rs_score": row.rs.score,
+                    "discovery_score": row.rs.discovery_score,
+                    "persistence": row.rs.persistence,
+                    "acceleration": row.rs.acceleration,
+                    "beta": row.rs.beta.beta if row.rs.beta else None,
+                    "beta_standard_error": (
+                        row.rs.beta.beta_standard_error if row.rs.beta else None
+                    ),
+                    "secondary_beta": (
+                        row.rs.beta.secondary_beta if row.rs.beta else None
+                    ),
+                    "secondary_primary_beta": (
+                        row.rs.beta.secondary_primary_beta if row.rs.beta else None
+                    ),
+                    "beta_r_squared": row.rs.beta.r_squared if row.rs.beta else None,
+                    "cpr_width_percentile": row.market.cpr_width_percentile,
+                    "relative_notional_volume": (
+                        context.relative_notional_volume if context else None
+                    ),
+                    "day_notional_volume": (
+                        context.day_notional_volume if context else None
+                    ),
+                    "impact_spread_bps": (
+                        context.impact_spread_bps if context else None
+                    ),
+                    "funding_rate": context.funding_rate if context else None,
+                    "open_interest": context.open_interest if context else None,
+                    "positive_rs_breadth": positive_breadth,
+                    "residual_momentum_24h": (
+                        row.rs.horizon_excess_return.get("medium")
+                    ),
+                    "residual_momentum_percentile": (
+                        momentum_percentiles.get(row.symbol)
+                    ),
+                    "secondary_factor_constituents": (
+                        row.rs.secondary_factor_constituents
+                    ),
+                    "completed_structure": (
+                        1.0 if _completed_structure_side(row) == direction else 0.0
+                    ),
+                    "trigger_threshold": (
+                        scanner_config.candidate_rs_score
+                        if event_rule == "confirmed_candidate"
+                        else 0.80
+                        if event_rule == "residual_momentum_baseline"
+                        else scanner_config.early_discovery_score
+                        if event_rule == "early_discovery"
+                        else scanner_config.strong_discovery_score
+                    ),
+                }
+                pending.append((
+                    event_rule, as_of, row.symbol, direction, row.price,
+                    float(trigger_score), features, factor_constituents,
+                ))
+            prior_states[event_rule] = current_states
 
     events: list[EventOutcome] = []
-    for timestamp, symbol, direction, entry_price, score, features in pending:
+    for (
+        event_rule, timestamp, symbol, direction, entry_price, score, features,
+        factor_constituents,
+    ) in pending:
         entry_open = timestamp - timedelta(seconds=step)
         exit_open = entry_open + timedelta(seconds=step * horizon_bars)
         exit_price = closes_by_symbol.get(symbol, {}).get(exit_open)
-        benchmark_entry = closes_by_symbol.get(scanner_config.benchmark, {}).get(entry_open)
-        benchmark_exit = closes_by_symbol.get(scanner_config.benchmark, {}).get(exit_open)
+        benchmark_entry = closes_by_symbol.get(effective_config.benchmark, {}).get(entry_open)
+        benchmark_exit = closes_by_symbol.get(effective_config.benchmark, {}).get(exit_open)
         if exit_price is None or benchmark_entry is None or benchmark_exit is None:
             continue
         asset_forward_return = exit_price / entry_price - 1.0
@@ -311,10 +488,32 @@ def generate_point_in_time_events(
             if beta is not None else None
         )
         model_adjusted = beta_adjusted
-        secondary_symbol = scanner_config.rs.secondary_benchmark
+        secondary_symbol = effective_config.rs.secondary_benchmark
         secondary_beta = features.get("secondary_beta")
         secondary_primary_beta = features.get("secondary_primary_beta")
         if (
+            beta_adjusted is not None
+            and secondary_symbol == BROAD_ALT_FACTOR
+            and secondary_beta is not None
+            and secondary_primary_beta is not None
+        ):
+            broad_forward = _broad_alt_forward_log_return(
+                closes_by_symbol, factor_constituents, symbol,
+                entry_open, exit_open, step,
+                effective_config.rs.broad_alt_min_constituents,
+            )
+            if broad_forward is None:
+                model_adjusted = None
+            else:
+                secondary_factor_forward = (
+                    broad_forward
+                    - float(secondary_primary_beta)
+                    * math.log(benchmark_exit / benchmark_entry)
+                )
+                model_adjusted = (
+                    beta_adjusted - float(secondary_beta) * secondary_factor_forward
+                )
+        elif (
             beta_adjusted is not None
             and secondary_symbol
             and secondary_beta is not None
@@ -332,6 +531,8 @@ def generate_point_in_time_events(
                     beta_adjusted
                     - float(secondary_beta) * secondary_factor_forward
                 )
+            else:
+                model_adjusted = None
         exit_timestamp = exit_open + timedelta(seconds=step)
         funding = (
             funding_cost(symbol, timestamp, exit_timestamp, direction)
@@ -343,6 +544,7 @@ def generate_point_in_time_events(
             direction=direction,
             gross_forward_return=asset_forward_return,
             event_rule=event_rule,
+            factor_model=factor_model,
             funding_cost=funding,
             score=score,
             entry_price=entry_price,
@@ -354,6 +556,59 @@ def generate_point_in_time_events(
             features=features,
         ))
     return events
+
+
+def generate_point_in_time_events(
+    assets: Mapping[str, AssetInput],
+    scanner_config: ScannerConfig,
+    horizon_bars: int,
+    universe_size: Optional[int] = None,
+    context_at: Optional[ContextAt] = None,
+    funding_cost: Optional[FundingCost] = None,
+    event_rule: str = "confirmed_candidate",
+    factor_model: str = CURRENT_FACTOR_MODEL,
+) -> list[EventOutcome]:
+    """Generate one frozen rule while preserving the original public API."""
+    return _generate_point_in_time_events_for_rules(
+        assets=assets,
+        scanner_config=scanner_config,
+        horizon_bars=horizon_bars,
+        universe_size=universe_size,
+        context_at=context_at,
+        funding_cost=funding_cost,
+        event_rules=(event_rule,),
+        factor_model=factor_model,
+    )
+
+
+def generate_point_in_time_event_suite(
+    assets: Mapping[str, AssetInput],
+    scanner_config: ScannerConfig,
+    horizon_bars: int,
+    event_rules: Sequence[str],
+    universe_size: Optional[int] = None,
+    context_at: Optional[ContextAt] = None,
+    funding_cost: Optional[FundingCost] = None,
+    factor_model: str = CURRENT_FACTOR_MODEL,
+) -> dict[str, list[EventOutcome]]:
+    """Evaluate several rules from one point-in-time scan per timestamp."""
+    ordered_rules = tuple(dict.fromkeys(event_rules))
+    events = _generate_point_in_time_events_for_rules(
+        assets=assets,
+        scanner_config=scanner_config,
+        horizon_bars=horizon_bars,
+        universe_size=universe_size,
+        context_at=context_at,
+        funding_cost=funding_cost,
+        event_rules=ordered_rules,
+        factor_model=factor_model,
+    )
+    return {
+        event_rule: [
+            event for event in events if event.event_rule == event_rule
+        ]
+        for event_rule in ordered_rules
+    }
 
 
 def net_returns(

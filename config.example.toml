@@ -16,6 +16,7 @@ min_alignment_ratio = 0.95
 min_empirical_windows = 60
 winsor_mad = 6.0
 secondary_benchmark = "ETH"
+broad_alt_min_constituents = 5  # used by the research-only broad-alt factor challenger
 
 [decision]
 candidate_rs_score = 3.5

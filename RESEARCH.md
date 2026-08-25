@@ -17,9 +17,11 @@
 | H3 | Relative resilience in BTC stress is a distinct feature | BTC 4h return below its trailing 20th percentile; alt remains above TC with positive residual return | Next 4h/24h residual return | Holding structure during benchmark weakness could reveal genuine demand | No incremental OOS value over RS alone. |
 | H4 | Pivot acceptance matters only after RS confirmation | H1, then first completed close across R1/S1 versus no cross | Next 4h/24h residual return, adverse excursion | A level can identify acceptance/failed acceptance, not magical support | Similar or worse outcomes than H1 without pivot condition. |
 | H5 | Persistence-free residual strength continues after completed structural acceptance | Discovery score ≥ +3.0 and completed close above active TC and daily pivot; symmetric short below BC and pivot | 4h, 24h, and 3d full-model factor-adjusted forward return, net of costs | Strong residual momentum may matter when price has accepted the same side of prior-session structure, without relying on the null persistence feature | No incremental net OOS expectancy versus strong discovery alone and a simple 24h residual-momentum rank, in both directions and more than one liquid cohort. |
+| H6 | A broad liquid-alt factor separates token-specific strength better than ETH alone | H5 rebuilt with BTC plus an orthogonal, equal-weight, leave-one-out alt factor | Same H5 outcomes plus event count and factor-fit diagnostics | Removing contemporaneous broad-alt movement may stop sector rotation from masquerading as single-token strength | No OOS improvement over H5 under BTC+ETH, materially worse factor availability, or gains confined to one regime or cohort. |
 
 H1 remains the only live candidate rule. H2–H4 are analysis slices. H5 is a formally
-registered challenger and remains research-only until it clears the same promotion gates.
+registered signal challenger and H6 is its factor-model challenger. Both remain
+research-only until they clear the same promotion gates.
 
 ### Predeclared discovery tiers
 
@@ -47,6 +49,36 @@ H5.
 The point-in-time rule name is `h5_discovery_structure`. It must be reported beside
 `strong_discovery` and `confirmed_candidate`; it must not be promoted based on its
 in-sample result or a threshold selected after inspection.
+
+### Frozen five-model comparison
+
+`backtest --comparison-suite` runs exactly these specifications:
+
+| Spec | Rule | Factor model | Purpose |
+| --- | --- | --- | --- |
+| H1 | Frozen 3.5 composite + persistence + completed structure | BTC + orthogonal ETH | Current control |
+| D1 | Persistence-free discovery at 3.0 | BTC + orthogonal ETH | Tests the discovery score without structure |
+| H5 | D1 + matching completed CPR/pivot structure | BTC + orthogonal ETH | Tests the incremental structure condition |
+| B1 | Signed top/bottom 20% cross-sectional rank of 24h residual return | BTC + orthogonal ETH | Simple residual-momentum baseline |
+| H6 | H5 | BTC + orthogonal broad-alt factor | Tests the factor-model replacement |
+
+B1 uses only a completed 24h residual return, its point-in-time cross-sectional rank,
+and the sign of that return. It does not use the composite, acceleration, persistence,
+CPR, or pivot structure. Ties receive their average rank.
+
+For H6, the broad-alt factor is the equal-weight mean hourly log return of the
+point-in-time selected liquid-alt panel. BTC and the token being scored are excluded.
+At least five other alts must be present at every required bar; a missing cross-section
+creates an unavailable factor rather than a zero return. The factor is orthogonalised to
+BTC before entering the robust EWMA regression. Forward factor-adjusted outcomes hold the
+entry-time constituent set fixed, preventing outcome-period membership from leaking into
+the comparison.
+
+The common primary comparison is net signed asset-return expectancy on the chronological
+test split. BTC-adjusted return, each specification's full-model residual return, and
+factor availability are required diagnostics. This test split may rank challengers for
+further validation, but it cannot promote one. Promotion still requires rolling folds and
+a separate final holdout that was untouched while this suite was developed.
 
 ## Promotion gates
 
@@ -88,6 +120,8 @@ chronological train/test split.
 `h5_discovery_structure` is evaluated from the same completed-close rows. Its event
 features explicitly record the trigger threshold and whether completed structure matched
 the event direction, so a report can audit the rule without reconstructing its label.
+The suite evaluator computes all rules using a given factor model from one scan per
+timestamp, so H1, D1, H5, and B1 cannot diverge because of separately rebuilt panels.
 
 This mechanism prevents the obvious future-panel leak, but it cannot make a current
 metadata value historical. Spread, funding, and OI therefore require a genuinely

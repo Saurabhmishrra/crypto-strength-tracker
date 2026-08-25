@@ -1,13 +1,17 @@
 """Ranked, explainable scanner built from pure structure and RS features."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Mapping, Optional, Sequence
 
 from .market_structure import MarketStructureConfig, build_market_structure
 from .models import Candle, MarketContext, ScanRow, SetupAssessment
 from .relative_strength import RSConfig, compute_relative_strength
+
+
+BROAD_ALT_FACTOR = "BROAD_ALT_L1O"
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,82 @@ class ScannerConfig:
             )
         if not 0.0 <= self.candidate_persistence <= 1.0:
             raise ValueError("candidate_persistence must be in [0, 1]")
+
+
+def build_broad_alt_factors(
+    assets: Mapping[str, AssetInput],
+    benchmark: str,
+    interval_seconds: int,
+    min_constituents: int,
+) -> dict[str, tuple[list[Candle], int]]:
+    """Build equal-weight, leave-one-out broad-alt factors from known bars.
+
+    Each target gets a synthetic factor that excludes both BTC and itself. The
+    universe is the scanner's point-in-time selected panel, so no outcome-period
+    membership is introduced. A missing or undersized cross-section creates a
+    gap and makes the secondary factor unavailable rather than silently filling
+    it with zero.
+    """
+    benchmark_asset = assets.get(benchmark)
+    if benchmark_asset is None:
+        return {}
+    targets = sorted(symbol for symbol in assets if symbol != benchmark)
+    if not targets:
+        return {}
+    closes = {
+        symbol: {bar.timestamp: bar.close for bar in asset.intraday}
+        for symbol, asset in assets.items() if symbol != benchmark
+    }
+    timestamps = sorted({bar.timestamp for bar in benchmark_asset.intraday})
+    if not timestamps:
+        return {}
+    step = timedelta(seconds=interval_seconds)
+    prices = {symbol: 100.0 for symbol in targets}
+    bars: dict[str, list[Candle]] = {symbol: [] for symbol in targets}
+    minimum_seen = {symbol: math.inf for symbol in targets}
+
+    for timestamp in timestamps[1:]:
+        previous = timestamp - step
+        returns: dict[str, float] = {}
+        for symbol, by_time in closes.items():
+            prior_close = by_time.get(previous)
+            current_close = by_time.get(timestamp)
+            if prior_close is None or current_close is None:
+                continue
+            returns[symbol] = math.log(current_close / prior_close)
+        total = sum(returns.values())
+        count = len(returns)
+        for target in targets:
+            target_return = returns.get(target)
+            constituent_count = count - (1 if target_return is not None else 0)
+            if constituent_count < min_constituents:
+                # A factor return cannot be inferred from an undersized panel.
+                # Discard the earlier segment so a later valid observation does
+                # not bridge the gap with a synthetic zero return.
+                prices[target] = 100.0
+                bars[target] = []
+                minimum_seen[target] = math.inf
+                continue
+            if not bars[target]:
+                bars[target].append(Candle(
+                    previous, 100.0, 100.0, 100.0, 100.0,
+                    float(constituent_count),
+                ))
+            factor_return = (
+                total - (target_return if target_return is not None else 0.0)
+            ) / constituent_count
+            prices[target] *= math.exp(factor_return)
+            price = prices[target]
+            bars[target].append(Candle(
+                timestamp, price, price, price, price, float(constituent_count)
+            ))
+            minimum_seen[target] = min(minimum_seen[target], constituent_count)
+
+    return {
+        symbol: (factor_bars, int(minimum_seen[symbol]))
+        for symbol, factor_bars in bars.items()
+        if minimum_seen[symbol] != math.inf
+    }
 
 
 def _crossed_up(price: float, prior: Optional[float], level: float) -> bool:
@@ -206,7 +286,15 @@ def scan_assets(
         raise ValueError(f"benchmark {config.benchmark} is missing")
     secondary = (
         assets.get(config.rs.secondary_benchmark)
-        if config.rs.secondary_benchmark else None
+        if config.rs.secondary_benchmark
+        and config.rs.secondary_benchmark != BROAD_ALT_FACTOR else None
+    )
+    broad_alt_factors = (
+        build_broad_alt_factors(
+            assets, config.benchmark, config.interval_seconds,
+            config.rs.broad_alt_min_constituents,
+        )
+        if config.rs.secondary_benchmark == BROAD_ALT_FACTOR else {}
     )
     rows: list[ScanRow] = []
     for symbol, asset in sorted(assets.items()):
@@ -216,18 +304,30 @@ def scan_assets(
             symbol=symbol, closed_daily=asset.daily, price=asset.price,
             session_open=asset.session_open, as_of=as_of, config=config.market,
         )
+        if config.rs.secondary_benchmark == BROAD_ALT_FACTOR:
+            factor_bars, factor_constituents = broad_alt_factors.get(
+                symbol, ([], None)
+            )
+            factor_name = BROAD_ALT_FACTOR
+        else:
+            factor_bars = (
+                secondary.intraday
+                if secondary is not None and symbol != config.rs.secondary_benchmark else ()
+            )
+            factor_constituents = (
+                1 if secondary is not None and symbol != config.rs.secondary_benchmark else None
+            )
+            factor_name = (
+                config.rs.secondary_benchmark
+                if secondary is not None and symbol != config.rs.secondary_benchmark else None
+            )
         rs = compute_relative_strength(
             symbol=symbol, asset_bars=asset.intraday, benchmark=config.benchmark,
             benchmark_bars=benchmark.intraday, interval_seconds=config.interval_seconds,
             as_of=as_of, config=config.rs,
-            secondary_benchmark=(
-                config.rs.secondary_benchmark
-                if secondary is not None and symbol != config.rs.secondary_benchmark else None
-            ),
-            secondary_bars=(
-                secondary.intraday
-                if secondary is not None and symbol != config.rs.secondary_benchmark else ()
-            ),
+            secondary_benchmark=factor_name,
+            secondary_bars=factor_bars,
+            secondary_factor_constituents=factor_constituents,
         )
         confirmed_price = asset.intraday[-1].close if asset.intraday else None
         confirmed_prior = asset.intraday[-2].close if len(asset.intraday) >= 2 else None

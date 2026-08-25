@@ -129,6 +129,7 @@ class RelativeStrength:
     horizon_percentile: Mapping[str, Optional[float]] = field(default_factory=dict)
     model_version: str = "legacy"
     discovery_score: Optional[float] = None
+    secondary_factor_constituents: Optional[int] = None
 
     @property
     def is_usable(self) -> bool:

@@ -65,6 +65,12 @@ For aligned completed bars, the engine estimates a robust exponentially weighted
 
 BTC is always the primary factor. When ETH is available, its return is first residualised against BTC so the second coefficient measures ETH/alt-market behaviour rather than counting BTC exposure twice. Coefficients use EWMA weights and MAD winsorisation; the engine publishes approximate coefficient uncertainty, effective observations, `R²`, residual volatility, history count, and quality flags.
 
+The research path also supports a leave-one-out broad-alt challenger. It takes the
+equal-weight log return of the point-in-time selected alt panel, excludes the target and
+BTC, requires at least five constituents, and then orthogonalises that factor to BTC.
+This is not the live default. It exists to test whether ETH is an inadequate proxy for
+common alt movement without mechanically including the token in its own benchmark.
+
 For each 4h/24h/7d horizon, the current factor-adjusted cumulative return is divided by the robust scale of that token's prior rolling horizon sums. The scale is `1.4826 × MAD`, with a standard-deviation fallback only when MAD degenerates. This empirical distribution reflects observed clustering, autocorrelation, and tails much better than `one-bar sigma × sqrt(horizon)`. Because rolling windows overlap, the result is a descriptive robust unit, not a p-value or an independent Gaussian z-score. The bounded `-10..+10` composite is also not a z-score: `3.5` never means `3.5σ`.
 
 The bar interval changes sampling resolution, not the intended economic horizons. `RSConfig.for_interval` preserves 4h/24h/7d horizons, 24h persistence, a 30-day beta window, and a 7-day EWMA half-life when switching between supported intervals.
@@ -86,7 +92,7 @@ In live mode a current public mid beyond structure is labelled `PROVISIONAL`. It
 
 ## Point-in-time research path
 
-`generate_point_in_time_events` rebuilds the eligible volume-ranked universe, completed intraday history, completed daily structure, factor fit, RS values, and market breadth at every historical close. It records only new confirmed activations, then attaches fixed-horizon outcomes after event generation. The CLI `backtest` report keeps tradable asset return separate from event-time BTC-beta-adjusted and full BTC + orthogonal-ETH residual returns, and applies a chronological train/test split.
+`generate_point_in_time_events` rebuilds the eligible volume-ranked universe, completed intraday history, completed daily structure, factor fit, RS values, and market breadth at every historical close. It records only new rule activations, then attaches fixed-horizon outcomes after event generation. The CLI `backtest --comparison-suite` evaluates the frozen H1, persistence-free discovery, H5 structure challenger, a simple residual-momentum rank, and the broad-alt factor challenger. It keeps tradable asset return separate from event-time BTC-adjusted and selected full-model residual returns, and applies a chronological train/test split.
 
 This closes the tooling gap; it does not fill the evidence gap. Real point-in-time history, declared costs, rolling out-of-sample folds, and a final untouched holdout are still required before an input or label can be promoted.
 

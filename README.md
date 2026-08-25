@@ -24,6 +24,7 @@ The immediate objective is to answer a narrower question honestly: *do persisten
 
 - Daily CPR and floor-trader pivot calculations, normalized CPR-width percentile, Wilder ATR, realised volatility, level distances, and price/open location.
 - Robust EWMA beta versus BTC, optional orthogonal ETH factor, beta uncertainty, and multi-horizon relative strength standardised against each token's empirical rolling residual distribution.
+- A research-only BTC plus orthogonal leave-one-out broad-alt factor challenger, with a five-constituent minimum and no silent gap filling.
 - A persistence-free discovery score with predeclared 2.5 early and 3.0 strong tiers. These are research watches only. The original 3.5 composite score, 0.40 persistence gate, and structure rule remain frozen for candidates.
 - Cross-sectional ranking and explainable CPR + RS labels, with live mid-price previews explicitly separated from completed-bar confirmations.
 - Fixture-driven scanner CLI that writes an atomic JSON snapshot and lightweight static HTML report.
@@ -48,24 +49,22 @@ python3 -m terra_cpr.cli backtest --input path/to/history.json --cost-bps 10 \
   --output output/research_report.json
 ```
 
-The default remains frozen H1. To compare the predeclared discovery tiers, repeat
-`--event-rule` without changing thresholds:
+The default remains frozen H1. Run the complete predeclared comparison with:
 
 ```bash
 python3 -m terra_cpr.cli backtest --input path/to/history.json \
-  --event-rule confirmed_candidate --event-rule early_discovery \
-  --event-rule strong_discovery --event-rule h5_discovery_structure \
+  --comparison-suite --cost-bps 10 \
   --output output/research_report.json
 ```
 
-`h5_discovery_structure` is the frozen research challenger: absolute persistence-free
-discovery score of at least 3.0 plus a matching completed close outside the active CPR
-band and daily pivot. It does not change the live candidate or alert rules.
+The suite reports H1, persistence-free discovery, discovery plus completed structure,
+a simple 24h residual-momentum baseline, and the structure rule rebuilt with BTC plus a
+leave-one-out broad-alt factor. None changes the live candidate or alert rules.
 
 The report includes signed asset return (the feasibility/P&L view), event-time
-BTC-beta-adjusted forward log return, and the full BTC + orthogonal-ETH model residual
-return. It does not prove an edge by itself; rolling folds and a final untouched holdout
-remain required.
+BTC-beta-adjusted forward log return, and the selected full-model residual return. It
+does not prove an edge by itself; rolling folds and a final untouched holdout remain
+required.
 
 ## Live scanning and the local cockpit
 

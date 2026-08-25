@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
+import statistics
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +13,16 @@ from types import SimpleNamespace
 from terra_cpr.config import load_scanner_config
 from terra_cpr.data import HyperliquidPublicData, completed_bars, load_fixture, synthetic_demo_assets
 from terra_cpr.models import Candle
-from terra_cpr.scanner import ScannerConfig, _row_order, assess_setup, scan_assets
+from terra_cpr.relative_strength import RSConfig
+from terra_cpr.scanner import (
+    BROAD_ALT_FACTOR,
+    AssetInput,
+    ScannerConfig,
+    _row_order,
+    assess_setup,
+    build_broad_alt_factors,
+    scan_assets,
+)
 from terra_cpr.report import scan_snapshot
 
 
@@ -133,6 +145,95 @@ class DataAndScannerTests(unittest.TestCase):
     def test_discovery_thresholds_are_ordered_below_the_candidate_gate(self) -> None:
         with self.assertRaisesRegex(ValueError, "early <= strong <= candidate"):
             ScannerConfig(early_discovery_score=3.1, strong_discovery_score=3.0)
+
+    def test_broad_alt_factor_is_equal_weight_and_leave_one_out(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def bars(symbol_return: float) -> list[Candle]:
+            price = 100.0
+            output = []
+            for index in range(3):
+                if index:
+                    price *= 1.0 + symbol_return
+                timestamp = start + timedelta(hours=index)
+                output.append(Candle(timestamp, price, price, price, price, 1.0))
+            return output
+
+        assets = {
+            symbol: AssetInput(symbol, series[-1].close, (), series)
+            for symbol, series in {
+                "BTC": bars(0.0), "A": bars(0.01),
+                "B": bars(0.02), "C": bars(0.03),
+            }.items()
+        }
+        factors = build_broad_alt_factors(assets, "BTC", 3600, 2)
+        a_bars, a_count = factors["A"]
+        b_bars, b_count = factors["B"]
+        expected_a = 2 * statistics.fmean((math.log(1.02), math.log(1.03)))
+        expected_b = 2 * statistics.fmean((math.log(1.01), math.log(1.03)))
+        self.assertAlmostEqual(math.log(a_bars[-1].close / a_bars[0].close), expected_a)
+        self.assertAlmostEqual(math.log(b_bars[-1].close / b_bars[0].close), expected_b)
+        self.assertEqual((a_count, b_count), (2, 2))
+        self.assertNotEqual(a_bars[-1].close, b_bars[-1].close)
+
+    def test_broad_alt_factor_refuses_an_undersized_cross_section(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bars = [
+            Candle(start + timedelta(hours=index), 100 + index, 100 + index,
+                   100 + index, 100 + index, 1.0)
+            for index in range(3)
+        ]
+        assets = {
+            symbol: AssetInput(symbol, bars[-1].close, (), bars)
+            for symbol in ("BTC", "A", "B", "C")
+        }
+        self.assertEqual(build_broad_alt_factors(assets, "BTC", 3600, 3), {})
+
+    def test_broad_alt_factor_restarts_after_a_cross_section_gap(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def bars(missing: frozenset[int] = frozenset()) -> list[Candle]:
+            return [
+                Candle(
+                    start + timedelta(hours=index), 100 + index, 100 + index,
+                    100 + index, 100 + index, 1.0,
+                )
+                for index in range(6) if index not in missing
+            ]
+
+        assets = {
+            "BTC": AssetInput("BTC", 105, (), bars()),
+            "A": AssetInput("A", 105, (), bars()),
+            "B": AssetInput("B", 105, (), bars(frozenset({2}))),
+            "C": AssetInput("C", 105, (), bars(frozenset({2}))),
+        }
+        factor_bars, _count = build_broad_alt_factors(
+            assets, "BTC", 3600, min_constituents=2
+        )["A"]
+        self.assertEqual(
+            [bar.timestamp for bar in factor_bars],
+            [start + timedelta(hours=index) for index in (3, 4, 5)],
+        )
+
+    def test_scanner_can_use_the_broad_alt_factor_without_touching_live_defaults(self) -> None:
+        as_of, interval, assets = synthetic_demo_assets()
+        broad_rs = replace(
+            RSConfig.for_interval(interval),
+            secondary_benchmark=BROAD_ALT_FACTOR,
+            broad_alt_min_constituents=1,
+        )
+        rows = scan_assets(
+            assets, as_of,
+            ScannerConfig(interval_seconds=interval, rs=broad_rs),
+        )
+        self.assertTrue(all(row.rs.beta is not None for row in rows))
+        self.assertTrue(all(
+            row.rs.beta.secondary_benchmark == BROAD_ALT_FACTOR
+            for row in rows if row.rs.beta is not None
+        ))
+        self.assertTrue(all(row.rs.secondary_factor_constituents == 1 for row in rows))
+        self.assertTrue(all("broad_alt_l1o" in row.rs.model_version for row in rows))
+        self.assertEqual(RSConfig().secondary_benchmark, "ETH")
 
 
 class AtomicWriteTests(unittest.TestCase):

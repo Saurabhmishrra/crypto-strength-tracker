@@ -1,18 +1,31 @@
 from __future__ import annotations
 
+import math
+import json
+import tempfile
 import unittest
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 from terra_cpr.data import synthetic_demo_assets
 from terra_cpr.research import (
+    BROAD_ALT_FACTOR_MODEL,
+    FIVE_MODEL_COMPARISON,
+    _broad_alt_forward_log_return,
     EventOutcome,
     chronological_split,
     evaluate,
     feature_buckets,
     generate_point_in_time_events,
+    generate_point_in_time_event_suite,
     score_buckets,
 )
 from terra_cpr.scanner import ScannerConfig
+from terra_cpr.relative_strength import RSConfig
+from terra_cpr.cli import _write_backtest
 
 
 class ResearchTests(unittest.TestCase):
@@ -110,6 +123,125 @@ class ResearchTests(unittest.TestCase):
             self.assertGreaterEqual(abs(event.score or 0.0), 3.0)
             self.assertEqual(event.features["completed_structure"], 1.0)
             self.assertEqual(event.features["trigger_threshold"], 3.0)
+
+    def test_residual_momentum_baseline_uses_cross_sectional_tail_and_sign(self) -> None:
+        _, interval, assets = synthetic_demo_assets()
+        events = generate_point_in_time_events(
+            assets,
+            ScannerConfig(interval_seconds=interval),
+            horizon_bars=4,
+            event_rule="residual_momentum_baseline",
+        )
+        self.assertGreater(len(events), 0)
+        for event in events:
+            percentile = event.features["residual_momentum_percentile"]
+            residual = event.features["residual_momentum_24h"]
+            self.assertIsNotNone(percentile)
+            self.assertIsNotNone(residual)
+            assert percentile is not None and residual is not None
+            if event.direction == "LONG":
+                self.assertGreaterEqual(percentile, 0.80)
+                self.assertGreater(residual, 0.0)
+            else:
+                self.assertLessEqual(percentile, 0.20)
+                self.assertLess(residual, 0.0)
+
+    def test_five_model_suite_is_frozen_and_auditable(self) -> None:
+        self.assertEqual(
+            [spec.spec_id for spec in FIVE_MODEL_COMPARISON],
+            ["H1", "D1", "H5", "B1", "H6"],
+        )
+        h6 = FIVE_MODEL_COMPARISON[-1]
+        self.assertEqual(h6.event_rule, "h5_discovery_structure")
+        self.assertEqual(h6.factor_model, BROAD_ALT_FACTOR_MODEL)
+
+    def test_multi_rule_generator_keeps_rule_states_separate(self) -> None:
+        _, interval, assets = synthetic_demo_assets()
+        events = generate_point_in_time_event_suite(
+            assets,
+            ScannerConfig(interval_seconds=interval),
+            horizon_bars=4,
+            event_rules=("strong_discovery", "h5_discovery_structure"),
+        )
+        self.assertEqual(set(events), {"strong_discovery", "h5_discovery_structure"})
+        self.assertTrue(all(
+            event.event_rule == event_rule
+            for event_rule, rule_events in events.items()
+            for event in rule_events
+        ))
+        self.assertGreater(len(events["strong_discovery"]), 0)
+        self.assertGreater(len(events["h5_discovery_structure"]), 0)
+
+    def test_broad_alt_forward_outcome_holds_entry_constituents_fixed(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        returns = {"T": 0.04, "A": 0.01, "B": 0.02, "C": 0.03}
+        closes = {}
+        for symbol, hourly_return in returns.items():
+            price = 100.0
+            by_time = {start: price}
+            for index in (1, 2):
+                price *= 1.0 + hourly_return
+                by_time[start + timedelta(hours=index)] = price
+            closes[symbol] = by_time
+        factor_return = _broad_alt_forward_log_return(
+            closes, ("T", "A", "B", "C"), "T",
+            start, start + timedelta(hours=2), 3600, 3,
+        )
+        expected = 2 * sum(math.log(1.0 + value) for value in (0.01, 0.02, 0.03)) / 3
+        self.assertAlmostEqual(factor_return or 0.0, expected)
+
+    def test_broad_alt_challenger_is_generated_end_to_end(self) -> None:
+        _, interval, assets = synthetic_demo_assets()
+        config = ScannerConfig(
+            interval_seconds=interval,
+            rs=replace(
+                RSConfig.for_interval(interval),
+                broad_alt_min_constituents=1,
+            ),
+        )
+        events = generate_point_in_time_events(
+            assets, config, horizon_bars=4,
+            event_rule="h5_discovery_structure",
+            factor_model=BROAD_ALT_FACTOR_MODEL,
+        )
+        self.assertGreater(len(events), 0)
+        self.assertTrue(all(
+            event.factor_model == BROAD_ALT_FACTOR_MODEL
+            and event.features["secondary_factor_constituents"] == 1
+            and event.model_factor_adjusted_forward_log_return is not None
+            for event in events
+        ))
+
+    def test_cli_comparison_suite_reports_all_five_frozen_specs(self) -> None:
+        fixture = synthetic_demo_assets()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "comparison.json"
+            args = SimpleNamespace(
+                input=Path("unused.json"), output=output, config=None,
+                horizon_bars=[4], universe=None, event_rule=None,
+                factor_model=None, comparison_suite=True,
+                cost_bps=10.0, train_fraction=0.65,
+            )
+            with patch("terra_cpr.cli.load_fixture", return_value=fixture):
+                _write_backtest(args)
+            report = json.loads(output.read_text())
+        self.assertEqual(report["schema_version"], 3)
+        self.assertEqual(
+            [spec["spec_id"] for spec in report["specifications"]],
+            ["H1", "D1", "H5", "B1", "H6"],
+        )
+        self.assertEqual(
+            {result["spec_id"] for result in report["results"]},
+            {"H1", "D1", "H5", "B1", "H6"},
+        )
+        self.assertEqual(
+            report["comparison_contract"]["primary_selection_metric"],
+            "asset_return.test.expectancy",
+        )
+        self.assertIn(
+            "final untouched holdout",
+            report["comparison_contract"]["promotion_rule"],
+        )
 
     def test_feature_buckets_keep_missing_values_explicit(self) -> None:
         events = [

@@ -13,7 +13,15 @@ from .data import HyperliquidPublicData, load_fixture, synthetic_demo_assets
 from .live import LiveConfig, LiveScanner
 from .relative_strength import RSConfig
 from .report import render_html, scan_snapshot, write_json_atomic
-from .research import chronological_split, evaluate, generate_point_in_time_events
+from .research import (
+    BROAD_ALT_FACTOR_MODEL,
+    CURRENT_FACTOR_MODEL,
+    FIVE_MODEL_COMPARISON,
+    ResearchSpecification,
+    chronological_split,
+    evaluate,
+    generate_point_in_time_event_suite,
+)
 from .scanner import ScannerConfig, scan_assets
 from .signal_history import append_history, signal_transitions
 from .dashboard import serve
@@ -70,59 +78,116 @@ def _write_backtest(args) -> None:
         config.rs.medium_horizon_bars,
         math.ceil(3 * 86_400 / interval),
     })
-    event_rules = getattr(args, "event_rule", None) or ["confirmed_candidate"]
+    comparison_suite = bool(getattr(args, "comparison_suite", False))
+    if comparison_suite:
+        if getattr(args, "event_rule", None) or getattr(args, "factor_model", None):
+            raise ValueError(
+                "--comparison-suite cannot be combined with --event-rule or "
+                "--factor-model"
+            )
+        specifications = FIVE_MODEL_COMPARISON
+    else:
+        event_rules = getattr(args, "event_rule", None) or ["confirmed_candidate"]
+        factor_models = getattr(args, "factor_model", None) or [CURRENT_FACTOR_MODEL]
+        specifications = tuple(
+            ResearchSpecification(
+                f"custom_{index}", f"{event_rule} with {factor_model}",
+                event_rule, factor_model,
+            )
+            for index, (event_rule, factor_model) in enumerate(
+                (
+                    (event_rule, factor_model)
+                    for factor_model in factor_models
+                    for event_rule in event_rules
+                ),
+                start=1,
+            )
+        )
     results = []
-    for event_rule in event_rules:
+    factor_models_in_order = tuple(dict.fromkeys(
+        specification.factor_model for specification in specifications
+    ))
+    for factor_model in factor_models_in_order:
+        model_specs = tuple(
+            specification for specification in specifications
+            if specification.factor_model == factor_model
+        )
+        event_rules = tuple(dict.fromkeys(
+            specification.event_rule for specification in model_specs
+        ))
         for horizon in horizons:
-            events = generate_point_in_time_events(
+            events_by_rule = generate_point_in_time_event_suite(
                 assets,
                 config,
                 horizon_bars=horizon,
+                event_rules=event_rules,
                 universe_size=args.universe,
-                event_rule=event_rule,
+                factor_model=factor_model,
             )
-            train, test = chronological_split(events, args.train_fraction)
-            results.append({
-                "event_rule": event_rule,
-                "horizon_bars": horizon,
-                "horizon_seconds": horizon * interval,
-                "event_count": len(events),
-                "asset_return": {
-                    "all": asdict(evaluate(events, args.cost_bps)),
-                    "train": asdict(evaluate(train, args.cost_bps)),
-                    "test": asdict(evaluate(test, args.cost_bps)),
-                },
-                "btc_beta_adjusted_return": {
-                    "all": asdict(evaluate(
-                        events, args.cost_bps, outcome="btc_beta_adjusted"
-                    )),
-                    "train": asdict(evaluate(
-                        train, args.cost_bps, outcome="btc_beta_adjusted"
-                    )),
-                    "test": asdict(evaluate(
-                        test, args.cost_bps, outcome="btc_beta_adjusted"
-                    )),
-                },
-                "model_factor_adjusted_return": {
-                    "all": asdict(evaluate(
-                        events, args.cost_bps, outcome="model_factor_adjusted"
-                    )),
-                    "train": asdict(evaluate(
-                        train, args.cost_bps, outcome="model_factor_adjusted"
-                    )),
-                    "test": asdict(evaluate(
-                        test, args.cost_bps, outcome="model_factor_adjusted"
-                    )),
-                },
-                "events": [asdict(event) for event in events],
-            })
+            for specification in model_specs:
+                events = events_by_rule[specification.event_rule]
+                train, test = chronological_split(events, args.train_fraction)
+                results.append({
+                    "spec_id": specification.spec_id,
+                    "spec_label": specification.label,
+                    "event_rule": specification.event_rule,
+                    "factor_model": specification.factor_model,
+                    "horizon_bars": horizon,
+                    "horizon_seconds": horizon * interval,
+                    "event_count": len(events),
+                    "asset_return": {
+                        "all": asdict(evaluate(events, args.cost_bps)),
+                        "train": asdict(evaluate(train, args.cost_bps)),
+                        "test": asdict(evaluate(test, args.cost_bps)),
+                    },
+                    "btc_beta_adjusted_return": {
+                        "all": asdict(evaluate(
+                            events, args.cost_bps, outcome="btc_beta_adjusted"
+                        )),
+                        "train": asdict(evaluate(
+                            train, args.cost_bps, outcome="btc_beta_adjusted"
+                        )),
+                        "test": asdict(evaluate(
+                            test, args.cost_bps, outcome="btc_beta_adjusted"
+                        )),
+                    },
+                    "model_factor_adjusted_return": {
+                        "all": asdict(evaluate(
+                            events, args.cost_bps, outcome="model_factor_adjusted"
+                        )),
+                        "train": asdict(evaluate(
+                            train, args.cost_bps, outcome="model_factor_adjusted"
+                        )),
+                        "test": asdict(evaluate(
+                            test, args.cost_bps, outcome="model_factor_adjusted"
+                        )),
+                    },
+                    "events": [asdict(event) for event in events],
+                })
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "as_of": as_of.isoformat(),
         "bar_interval_seconds": interval,
         "model_version": "robust_ewma_empirical_discovery_v2",
         "round_trip_cost_bps": args.cost_bps,
         "train_fraction": args.train_fraction,
+        "specifications": [asdict(specification) for specification in specifications],
+        "comparison_contract": (
+            {
+                "control": "H1",
+                "primary_selection_metric": "asset_return.test.expectancy",
+                "required_diagnostics": [
+                    "btc_beta_adjusted_return.test.expectancy",
+                    "model_factor_adjusted_return.test.expectancy",
+                    "event_count",
+                ],
+                "promotion_rule": (
+                    "A challenger cannot replace H1 from this split. It must also pass "
+                    "rolling out-of-sample folds and a final untouched holdout."
+                ),
+            }
+            if comparison_suite else None
+        ),
         "warning": (
             "Descriptive event study only. Promotion requires rolling folds and an "
             "untouched holdout; context inputs remain excluded from the score."
@@ -131,7 +196,7 @@ def _write_backtest(args) -> None:
     }
     write_json_atomic(args.output, report)
     counts = ", ".join(
-        f"{result['event_rule']}:{result['horizon_bars']} bars={result['event_count']}"
+        f"{result['spec_id']}:{result['horizon_bars']} bars={result['event_count']}"
         for result in results
     )
     print(f"wrote point-in-time research report to {args.output}; {counts}")
@@ -220,9 +285,18 @@ def main() -> None:
         "--event-rule", action="append",
         choices=(
             "confirmed_candidate", "early_discovery", "strong_discovery",
-            "h5_discovery_structure",
+            "h5_discovery_structure", "residual_momentum_baseline",
         ),
         help="event rule to evaluate; repeat to compare predeclared rules",
+    )
+    backtest.add_argument(
+        "--factor-model", action="append",
+        choices=(CURRENT_FACTOR_MODEL, BROAD_ALT_FACTOR_MODEL),
+        help="factor model to evaluate; repeat for a cross-model comparison",
+    )
+    backtest.add_argument(
+        "--comparison-suite", action="store_true",
+        help="run the frozen H1/D1/H5/B1/H6 five-model comparison",
     )
     backtest.add_argument(
         "--cost-bps", type=float, default=10.0,
