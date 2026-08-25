@@ -1,6 +1,15 @@
 # Strength Tracker
 
-Strength Tracker is a **research-first, beta-adjusted relative-strength and market-structure scanner**. CPR is one structure input, not the product identity. It is not connected to an exchange account and contains no order-placement code or credential loading.
+*Factor-adjusted crypto strength, structure, and research replay.*
+
+Strength Tracker is a research-first cryptocurrency relative-strength scanner. It separates broad
+BTC and ETH market exposure from token-specific strength using robust factor models, then combines
+residual momentum, persistence, CPR, and pivot structure to identify provisional and
+completed-bar-confirmed candidates.
+
+The project includes a read-only Hyperliquid market-data loop, an explainable local dashboard, and a
+point-in-time historical event generator for out-of-sample research. It contains no account
+connectivity or trade-execution functionality.
 
 The immediate objective is to answer a narrower question honestly: *do persistent, beta-adjusted relative-strength regimes add useful information to CPR and pivot context after realistic trading costs?* The scanner can rank and explain candidates; it must not be used as proof of an executable trading edge.
 
