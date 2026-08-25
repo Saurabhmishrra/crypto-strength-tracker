@@ -54,8 +54,13 @@ The default remains frozen H1. To compare the predeclared discovery tiers, repea
 ```bash
 python3 -m terra_cpr.cli backtest --input path/to/history.json \
   --event-rule confirmed_candidate --event-rule early_discovery \
-  --event-rule strong_discovery --output output/research_report.json
+  --event-rule strong_discovery --event-rule h5_discovery_structure \
+  --output output/research_report.json
 ```
+
+`h5_discovery_structure` is the frozen research challenger: absolute persistence-free
+discovery score of at least 3.0 plus a matching completed close outside the active CPR
+band and daily pivot. It does not change the live candidate or alert rules.
 
 The report includes signed asset return (the feasibility/P&L view), event-time
 BTC-beta-adjusted forward log return, and the full BTC + orthogonal-ETH model residual

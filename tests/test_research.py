@@ -97,6 +97,20 @@ class ResearchTests(unittest.TestCase):
         self.assertTrue(all(event.event_rule == "early_discovery" for event in events))
         self.assertTrue(all(abs(event.score or 0.0) >= 2.5 for event in events))
 
+    def test_h5_is_strong_discovery_conditioned_on_completed_structure(self) -> None:
+        _, interval, assets = synthetic_demo_assets()
+        config = ScannerConfig(interval_seconds=interval)
+        h5 = generate_point_in_time_events(
+            assets, config, horizon_bars=4,
+            event_rule="h5_discovery_structure",
+        )
+        self.assertGreater(len(h5), 0)
+        for event in h5:
+            self.assertEqual(event.event_rule, "h5_discovery_structure")
+            self.assertGreaterEqual(abs(event.score or 0.0), 3.0)
+            self.assertEqual(event.features["completed_structure"], 1.0)
+            self.assertEqual(event.features["trigger_threshold"], 3.0)
+
     def test_feature_buckets_keep_missing_values_explicit(self) -> None:
         events = [
             EventOutcome(

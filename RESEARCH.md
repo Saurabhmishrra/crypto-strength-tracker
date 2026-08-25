@@ -16,8 +16,10 @@
 | H2 | CPR width modulates opportunity, not direction | H1 event split by width percentile <25 / 25–75 / >75 | Absolute future range and net directional return | Width may distinguish quiet from expansion sessions | Directional differences do not replicate; then use width only for expected-range/risk estimates. |
 | H3 | Relative resilience in BTC stress is a distinct feature | BTC 4h return below its trailing 20th percentile; alt remains above TC with positive residual return | Next 4h/24h residual return | Holding structure during benchmark weakness could reveal genuine demand | No incremental OOS value over RS alone. |
 | H4 | Pivot acceptance matters only after RS confirmation | H1, then first completed close across R1/S1 versus no cross | Next 4h/24h residual return, adverse excursion | A level can identify acceptance/failed acceptance, not magical support | Similar or worse outcomes than H1 without pivot condition. |
+| H5 | Persistence-free residual strength continues after completed structural acceptance | Discovery score ≥ +3.0 and completed close above active TC and daily pivot; symmetric short below BC and pivot | 4h, 24h, and 3d full-model factor-adjusted forward return, net of costs | Strong residual momentum may matter when price has accepted the same side of prior-session structure, without relying on the null persistence feature | No incremental net OOS expectancy versus strong discovery alone and a simple 24h residual-momentum rank, in both directions and more than one liquid cohort. |
 
-H1 is the only candidate allowed into a first implementation. H2–H4 are analysis slices, not extra filters, until their incremental value is demonstrated.
+H1 remains the only live candidate rule. H2–H4 are analysis slices. H5 is a formally
+registered challenger and remains research-only until it clears the same promotion gates.
 
 ### Predeclared discovery tiers
 
@@ -32,6 +34,19 @@ gates. This separation is deliberate: the persistence replay is null, but removi
 from H1 would create an unregistered replacement hypothesis. Point-in-time event output
 records both scores so 2.5 and 3.0 can be compared chronologically without tuning them
 after seeing outcomes.
+
+### H5 challenger protocol
+
+H5 freezes the **3.0 strong-discovery threshold** as its primary specification. A long
+event begins only when a completed bar closes above both the active CPR top and daily
+pivot while the persistence-free discovery score is at least +3.0. A short event is the
+exact signed mirror below the CPR bottom and pivot at -3.0 or lower. Mid-price crossings,
+the 2.5 early tier, persistence, and the original confirmed composite score do not enter
+H5.
+
+The point-in-time rule name is `h5_discovery_structure`. It must be reported beside
+`strong_discovery` and `confirmed_candidate`; it must not be promoted based on its
+in-sample result or a threshold selected after inspection.
 
 ## Promotion gates
 
@@ -69,6 +84,10 @@ and breadth as they were knowable at that time. Candidate events are frozen befo
 4h/24h/3d outcomes are attached. The `backtest` CLI writes signed asset-return,
 event-time BTC-beta-adjusted, and full BTC + orthogonal-ETH residual metrics with a
 chronological train/test split.
+
+`h5_discovery_structure` is evaluated from the same completed-close rows. Its event
+features explicitly record the trigger threshold and whether completed structure matched
+the event direction, so a report can audit the rule without reconstructing its label.
 
 This mechanism prevents the obvious future-panel leak, but it cannot make a current
 metadata value historical. Spread, funding, and OI therefore require a genuinely

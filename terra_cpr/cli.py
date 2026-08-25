@@ -218,7 +218,10 @@ def main() -> None:
     )
     backtest.add_argument(
         "--event-rule", action="append",
-        choices=("confirmed_candidate", "early_discovery", "strong_discovery"),
+        choices=(
+            "confirmed_candidate", "early_discovery", "strong_discovery",
+            "h5_discovery_structure",
+        ),
         help="event rule to evaluate; repeat to compare predeclared rules",
     )
     backtest.add_argument(

@@ -78,6 +78,16 @@ ContextAt = Callable[[str, datetime], Optional[MarketContext]]
 FundingCost = Callable[[str, datetime, datetime, str], float]
 
 
+def _completed_structure_side(row) -> str:
+    """Direction accepted by the completed close used for this replay row."""
+    price = row.price
+    if price > row.market.active_cpr.top and price > row.market.pivots.pivot:
+        return "LONG"
+    if price < row.market.active_cpr.bottom and price < row.market.pivots.pivot:
+        return "SHORT"
+    return "NONE"
+
+
 def _bars_closed_by(
     candles: Sequence[Candle], as_of: datetime, interval_seconds: int
 ) -> list[Candle]:
@@ -153,14 +163,16 @@ def generate_point_in_time_events(
 
     Universe membership, feature history, beta/RS inputs, and daily structure are
     rebuilt at every timestamp. ``confirmed_candidate`` preserves frozen H1.
-    The two discovery rules trigger from completed-bar persistence-free scores
-    only and are research events, not scanner alerts. Outcomes are attached only
+    The discovery rules trigger from completed-bar persistence-free scores only.
+    H5 additionally requires matching completed-close CPR and pivot structure.
+    They are research events, not scanner alerts. Outcomes are attached only
     after the complete event set has been generated.
     """
     if horizon_bars <= 0:
         raise ValueError("horizon_bars must be positive")
     if event_rule not in {
-        "confirmed_candidate", "early_discovery", "strong_discovery"
+        "confirmed_candidate", "early_discovery", "strong_discovery",
+        "h5_discovery_structure",
     }:
         raise ValueError(f"unknown event_rule {event_rule}")
     benchmark = assets.get(scanner_config.benchmark)
@@ -231,6 +243,11 @@ def generate_point_in_time_events(
                 if trigger_score is None or abs(trigger_score) < threshold:
                     continue
                 direction = "LONG" if trigger_score > 0 else "SHORT"
+                if (
+                    event_rule == "h5_discovery_structure"
+                    and _completed_structure_side(row) != direction
+                ):
+                    continue
                 state = (event_rule, direction)
             current_states[row.symbol] = state
             if prior_states.get(row.symbol) == state:
@@ -259,6 +276,16 @@ def generate_point_in_time_events(
                 "funding_rate": context.funding_rate if context else None,
                 "open_interest": context.open_interest if context else None,
                 "positive_rs_breadth": positive_breadth,
+                "completed_structure": (
+                    1.0 if _completed_structure_side(row) == direction else 0.0
+                ),
+                "trigger_threshold": (
+                    scanner_config.candidate_rs_score
+                    if event_rule == "confirmed_candidate"
+                    else scanner_config.early_discovery_score
+                    if event_rule == "early_discovery"
+                    else scanner_config.strong_discovery_score
+                ),
             }
             pending.append((
                 as_of, row.symbol, direction, row.price,
