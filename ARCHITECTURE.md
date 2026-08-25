@@ -94,6 +94,15 @@ In live mode a current public mid beyond structure is labelled `PROVISIONAL`. It
 
 `generate_point_in_time_events` rebuilds the eligible volume-ranked universe, completed intraday history, completed daily structure, factor fit, RS values, and market breadth at every historical close. It records only new rule activations, then attaches fixed-horizon outcomes after event generation. The CLI `backtest --comparison-suite` evaluates the frozen H1, persistence-free discovery, H5 structure challenger, a simple residual-momentum rank, and the broad-alt factor challenger. It keeps tradable asset return separate from event-time BTC-adjusted and selected full-model residual returns, and applies a chronological train/test split.
 
+The live completed-bar path also commits a durable SQLite archive on the mounted data
+volume. One transaction stores immutable candles, point-in-time panel membership and
+context, all five active model observations, and state transitions. SQLite uniqueness
+keys make candle ingestion and repeated close processing idempotent; the current state
+table prevents deployments from manufacturing duplicate activations. Fast mid-price
+ticks never enter this archive. A per-model evaluation row records usable and
+factor-available counts even when there is no active signal, so missing factor data is
+not misclassified as model selectivity.
+
 This closes the tooling gap; it does not fill the evidence gap. Real point-in-time history, declared costs, rolling out-of-sample folds, and a final untouched holdout are still required before an input or label can be promoted.
 
 This is a transparent hypothesis generator, not a conclusion that those combinations work. The labels are designed to produce a finite, timestamped event set for the tests below.

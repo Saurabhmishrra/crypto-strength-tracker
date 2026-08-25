@@ -10,10 +10,9 @@ WORKDIR /app
 COPY terra_cpr/ ./terra_cpr/
 COPY pyproject.toml README.md ./
 
-# The loop publishes a snapshot and appends to a transitions history. Mount a
-# volume at /data to keep that history across releases; without one the feed
-# restarts empty on every deploy, and the feed is the only record of what the
-# scanner actually said at the time.
+# The loop publishes a snapshot, appends confirmed transitions, and commits the
+# five-model completed-bar research archive. Mount a volume at /data to keep both
+# histories across releases.
 RUN useradd --create-home --uid 10001 scanner \
  && mkdir -p /data \
  && chown -R scanner:scanner /app /data

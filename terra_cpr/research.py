@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 
-from .models import Candle, MarketContext
+from .models import Candle, MarketContext, ScanRow
 from .scanner import (
     BROAD_ALT_FACTOR,
     AssetInput,
@@ -18,6 +18,10 @@ from .scanner import (
 
 CURRENT_FACTOR_MODEL = "btc_eth"
 BROAD_ALT_FACTOR_MODEL = "btc_broad_alt"
+RESEARCH_EVENT_RULES = frozenset({
+    "confirmed_candidate", "early_discovery", "strong_discovery",
+    "h5_discovery_structure", "residual_momentum_baseline",
+})
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,24 @@ class ResearchSpecification:
     label: str
     event_rule: str
     factor_model: str
+
+
+@dataclass(frozen=True)
+class ResearchTrigger:
+    """One active, completed-bar research rule state."""
+
+    event_rule: str
+    symbol: str
+    direction: str
+    state_label: str
+    score: float
+    entry_price: float
+    model_version: str
+    features: Mapping[str, float | None]
+
+    @property
+    def state(self) -> tuple[str, str]:
+        return self.state_label, self.direction
 
 
 FIVE_MODEL_COMPARISON = (
@@ -121,7 +143,9 @@ FundingCost = Callable[[str, datetime, datetime, str], float]
 
 def _completed_structure_side(row) -> str:
     """Direction accepted by the completed close used for this replay row."""
-    price = row.price
+    price = row.setup.confirmation_price
+    if price is None:
+        price = row.price
     if price > row.market.active_cpr.top and price > row.market.pivots.pivot:
         return "LONG"
     if price < row.market.active_cpr.bottom and price < row.market.pivots.pivot:
@@ -129,7 +153,7 @@ def _completed_structure_side(row) -> str:
     return "NONE"
 
 
-def _config_for_factor_model(
+def config_for_factor_model(
     scanner_config: ScannerConfig, factor_model: str
 ) -> ScannerConfig:
     if factor_model == CURRENT_FACTOR_MODEL:
@@ -143,6 +167,160 @@ def _config_for_factor_model(
             rs=replace(scanner_config.rs, secondary_benchmark=BROAD_ALT_FACTOR),
         )
     raise ValueError(f"unknown factor_model {factor_model}")
+
+
+def active_research_triggers(
+    rows: Sequence[ScanRow],
+    scanner_config: ScannerConfig,
+    event_rules: Sequence[str],
+    factor_model: str = CURRENT_FACTOR_MODEL,
+) -> dict[str, dict[str, ResearchTrigger]]:
+    """Evaluate frozen completed-bar rules on one already-built scan.
+
+    Historical replay and the durable live archive both call this function. It
+    deliberately returns active states rather than transitions; each caller owns
+    the prior state appropriate to its persistence layer.
+    """
+    ordered_rules = tuple(dict.fromkeys(event_rules))
+    if not ordered_rules:
+        raise ValueError("event_rules must not be empty")
+    unknown_rules = sorted(set(ordered_rules).difference(RESEARCH_EVENT_RULES))
+    if unknown_rules:
+        raise ValueError(f"unknown event_rule {unknown_rules[0]}")
+    if factor_model not in {CURRENT_FACTOR_MODEL, BROAD_ALT_FACTOR_MODEL}:
+        raise ValueError(f"unknown factor_model {factor_model}")
+
+    usable_scores = [float(row.rs.score) for row in rows if row.rs.is_usable]
+    positive_breadth = (
+        sum(score > 0 for score in usable_scores) / len(usable_scores)
+        if usable_scores else None
+    )
+    momentum_percentiles = _residual_momentum_percentiles(rows)
+    output: dict[str, dict[str, ResearchTrigger]] = {
+        event_rule: {} for event_rule in ordered_rules
+    }
+
+    for event_rule in ordered_rules:
+        for row in rows:
+            if (
+                factor_model == BROAD_ALT_FACTOR_MODEL
+                and (
+                    row.rs.beta is None
+                    or row.rs.beta.secondary_benchmark != BROAD_ALT_FACTOR
+                    or row.rs.beta.secondary_beta is None
+                )
+            ):
+                continue
+            if event_rule == "confirmed_candidate":
+                if (
+                    not row.setup.label.endswith("CANDIDATE")
+                    or row.setup.confirmation != "CONFIRMED"
+                ):
+                    continue
+                direction = row.setup.direction
+                trigger_score = row.rs.score
+                state_label = row.setup.label
+            elif event_rule == "residual_momentum_baseline":
+                percentile = momentum_percentiles.get(row.symbol)
+                residual_return = row.rs.horizon_excess_return.get("medium")
+                trigger_score = row.rs.horizon_z.get("medium")
+                if (
+                    percentile is None or residual_return is None
+                    or trigger_score is None
+                ):
+                    continue
+                if percentile >= 0.80 and residual_return > 0:
+                    direction = "LONG"
+                elif percentile <= 0.20 and residual_return < 0:
+                    direction = "SHORT"
+                else:
+                    continue
+                state_label = event_rule
+            else:
+                trigger_score = row.rs.discovery_score
+                threshold = (
+                    scanner_config.early_discovery_score
+                    if event_rule == "early_discovery"
+                    else scanner_config.strong_discovery_score
+                )
+                if trigger_score is None or abs(trigger_score) < threshold:
+                    continue
+                direction = "LONG" if trigger_score > 0 else "SHORT"
+                if (
+                    event_rule == "h5_discovery_structure"
+                    and _completed_structure_side(row) != direction
+                ):
+                    continue
+                state_label = event_rule
+
+            if trigger_score is None:
+                continue
+            context = row.context
+            features: dict[str, float | None] = {
+                "rs_score": row.rs.score,
+                "discovery_score": row.rs.discovery_score,
+                "persistence": row.rs.persistence,
+                "acceleration": row.rs.acceleration,
+                "beta": row.rs.beta.beta if row.rs.beta else None,
+                "beta_standard_error": (
+                    row.rs.beta.beta_standard_error if row.rs.beta else None
+                ),
+                "secondary_beta": (
+                    row.rs.beta.secondary_beta if row.rs.beta else None
+                ),
+                "secondary_primary_beta": (
+                    row.rs.beta.secondary_primary_beta if row.rs.beta else None
+                ),
+                "beta_r_squared": row.rs.beta.r_squared if row.rs.beta else None,
+                "cpr_width_percentile": row.market.cpr_width_percentile,
+                "relative_notional_volume": (
+                    context.relative_notional_volume if context else None
+                ),
+                "day_notional_volume": (
+                    context.day_notional_volume if context else None
+                ),
+                "impact_spread_bps": (
+                    context.impact_spread_bps if context else None
+                ),
+                "funding_rate": context.funding_rate if context else None,
+                "open_interest": context.open_interest if context else None,
+                "positive_rs_breadth": positive_breadth,
+                "residual_momentum_24h": (
+                    row.rs.horizon_excess_return.get("medium")
+                ),
+                "residual_momentum_percentile": (
+                    momentum_percentiles.get(row.symbol)
+                ),
+                "secondary_factor_constituents": (
+                    row.rs.secondary_factor_constituents
+                ),
+                "completed_structure": (
+                    1.0 if _completed_structure_side(row) == direction else 0.0
+                ),
+                "trigger_threshold": (
+                    scanner_config.candidate_rs_score
+                    if event_rule == "confirmed_candidate"
+                    else 0.80
+                    if event_rule == "residual_momentum_baseline"
+                    else scanner_config.early_discovery_score
+                    if event_rule == "early_discovery"
+                    else scanner_config.strong_discovery_score
+                ),
+            }
+            entry_price = row.setup.confirmation_price
+            if entry_price is None:
+                entry_price = row.price
+            output[event_rule][row.symbol] = ResearchTrigger(
+                event_rule=event_rule,
+                symbol=row.symbol,
+                direction=direction,
+                state_label=state_label,
+                score=float(trigger_score),
+                entry_price=float(entry_price),
+                model_version=row.rs.model_version,
+                features=features,
+            )
+    return output
 
 
 def _residual_momentum_percentiles(rows) -> dict[str, float]:
@@ -286,16 +464,12 @@ def _generate_point_in_time_events_for_rules(
     """
     if horizon_bars <= 0:
         raise ValueError("horizon_bars must be positive")
-    allowed_rules = {
-        "confirmed_candidate", "early_discovery", "strong_discovery",
-        "h5_discovery_structure", "residual_momentum_baseline",
-    }
     if not event_rules:
         raise ValueError("event_rules must not be empty")
-    unknown_rules = sorted(set(event_rules).difference(allowed_rules))
+    unknown_rules = sorted(set(event_rules).difference(RESEARCH_EVENT_RULES))
     if unknown_rules:
         raise ValueError(f"unknown event_rule {unknown_rules[0]}")
-    effective_config = _config_for_factor_model(scanner_config, factor_model)
+    effective_config = config_for_factor_model(scanner_config, factor_model)
     benchmark = assets.get(effective_config.benchmark)
     if benchmark is None:
         raise ValueError(f"benchmark {effective_config.benchmark} is missing")
@@ -343,127 +517,25 @@ def _generate_point_in_time_events_for_rules(
             continue
         selected = _select_point_in_time_universe(panel, universe_size, required)
         rows = scan_assets(selected, as_of, effective_config)
-        usable_scores = [float(row.rs.score) for row in rows if row.rs.is_usable]
-        positive_breadth = (
-            sum(score > 0 for score in usable_scores) / len(usable_scores)
-            if usable_scores else None
+        triggers_by_rule = active_research_triggers(
+            rows, effective_config, event_rules, factor_model
         )
-        momentum_percentiles = _residual_momentum_percentiles(rows)
         factor_constituents = tuple(sorted(
             symbol for symbol in selected
             if symbol != effective_config.benchmark
         ))
         for event_rule in event_rules:
-            current_states: dict[str, tuple[str, str]] = {}
-            for row in rows:
-                if (
-                    factor_model == BROAD_ALT_FACTOR_MODEL
-                    and (
-                        row.rs.beta is None
-                        or row.rs.beta.secondary_benchmark != BROAD_ALT_FACTOR
-                        or row.rs.beta.secondary_beta is None
-                    )
-                ):
+            triggers = triggers_by_rule[event_rule]
+            current_states = {
+                symbol: trigger.state for symbol, trigger in triggers.items()
+            }
+            for symbol, trigger in triggers.items():
+                if prior_states[event_rule].get(symbol) == trigger.state:
                     continue
-                if event_rule == "confirmed_candidate":
-                    if (
-                        not row.setup.label.endswith("CANDIDATE")
-                        or row.setup.confirmation != "CONFIRMED"
-                    ):
-                        continue
-                    direction = row.setup.direction
-                    trigger_score = row.rs.score
-                    state = (row.setup.label, direction)
-                elif event_rule == "residual_momentum_baseline":
-                    percentile = momentum_percentiles.get(row.symbol)
-                    residual_return = row.rs.horizon_excess_return.get("medium")
-                    trigger_score = row.rs.horizon_z.get("medium")
-                    if (
-                        percentile is None or residual_return is None
-                        or trigger_score is None
-                    ):
-                        continue
-                    if percentile >= 0.80 and residual_return > 0:
-                        direction = "LONG"
-                    elif percentile <= 0.20 and residual_return < 0:
-                        direction = "SHORT"
-                    else:
-                        continue
-                    state = (event_rule, direction)
-                else:
-                    trigger_score = row.rs.discovery_score
-                    threshold = (
-                        scanner_config.early_discovery_score
-                        if event_rule == "early_discovery"
-                        else scanner_config.strong_discovery_score
-                    )
-                    if trigger_score is None or abs(trigger_score) < threshold:
-                        continue
-                    direction = "LONG" if trigger_score > 0 else "SHORT"
-                    if (
-                        event_rule == "h5_discovery_structure"
-                        and _completed_structure_side(row) != direction
-                    ):
-                        continue
-                    state = (event_rule, direction)
-                current_states[row.symbol] = state
-                if prior_states[event_rule].get(row.symbol) == state:
-                    continue
-                context = row.context
-                features: dict[str, float | None] = {
-                    "rs_score": row.rs.score,
-                    "discovery_score": row.rs.discovery_score,
-                    "persistence": row.rs.persistence,
-                    "acceleration": row.rs.acceleration,
-                    "beta": row.rs.beta.beta if row.rs.beta else None,
-                    "beta_standard_error": (
-                        row.rs.beta.beta_standard_error if row.rs.beta else None
-                    ),
-                    "secondary_beta": (
-                        row.rs.beta.secondary_beta if row.rs.beta else None
-                    ),
-                    "secondary_primary_beta": (
-                        row.rs.beta.secondary_primary_beta if row.rs.beta else None
-                    ),
-                    "beta_r_squared": row.rs.beta.r_squared if row.rs.beta else None,
-                    "cpr_width_percentile": row.market.cpr_width_percentile,
-                    "relative_notional_volume": (
-                        context.relative_notional_volume if context else None
-                    ),
-                    "day_notional_volume": (
-                        context.day_notional_volume if context else None
-                    ),
-                    "impact_spread_bps": (
-                        context.impact_spread_bps if context else None
-                    ),
-                    "funding_rate": context.funding_rate if context else None,
-                    "open_interest": context.open_interest if context else None,
-                    "positive_rs_breadth": positive_breadth,
-                    "residual_momentum_24h": (
-                        row.rs.horizon_excess_return.get("medium")
-                    ),
-                    "residual_momentum_percentile": (
-                        momentum_percentiles.get(row.symbol)
-                    ),
-                    "secondary_factor_constituents": (
-                        row.rs.secondary_factor_constituents
-                    ),
-                    "completed_structure": (
-                        1.0 if _completed_structure_side(row) == direction else 0.0
-                    ),
-                    "trigger_threshold": (
-                        scanner_config.candidate_rs_score
-                        if event_rule == "confirmed_candidate"
-                        else 0.80
-                        if event_rule == "residual_momentum_baseline"
-                        else scanner_config.early_discovery_score
-                        if event_rule == "early_discovery"
-                        else scanner_config.strong_discovery_score
-                    ),
-                }
                 pending.append((
-                    event_rule, as_of, row.symbol, direction, row.price,
-                    float(trigger_score), features, factor_constituents,
+                    event_rule, as_of, symbol, trigger.direction,
+                    trigger.entry_price, trigger.score, trigger.features,
+                    factor_constituents,
                 ))
             prior_states[event_rule] = current_states
 

@@ -221,8 +221,8 @@ def require_writable(output: Path) -> None:
     except OSError as exc:
         raise SystemExit(
             f"cannot write to {output}: {exc}\n"
-            "The scanner publishes its snapshot and signal history there, so every "
-            "tick would fail. On a mounted volume this usually means the mount is "
+            "The scanner publishes its snapshot, signal history, and research archive "
+            "there, so every tick would fail. On a mounted volume this usually means the mount is "
             "owned by root while this process runs unprivileged."
         ) from exc
     finally:

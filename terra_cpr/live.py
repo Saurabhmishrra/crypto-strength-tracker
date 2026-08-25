@@ -11,7 +11,7 @@ import math
 import statistics
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -19,6 +19,12 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from .data import completed_bars
 from .models import Candle, MarketContext
 from .report import scan_snapshot, write_json_atomic
+from .research import (
+    BROAD_ALT_FACTOR_MODEL,
+    CURRENT_FACTOR_MODEL,
+    config_for_factor_model,
+)
+from .research_archive import ResearchArchive
 from .scanner import AssetInput, ScannerConfig, scan_assets
 from .signal_history import append_history, signal_transitions
 
@@ -342,6 +348,7 @@ class LiveStatus:
     #: Symbols the universe selected but the caches cannot support yet, mapped
     #: to why. Never empty silently: a shrunken panel has to be visible.
     excluded_symbols: Mapping[str, str] = field(default_factory=dict)
+    research_archive: Mapping[str, Any] = field(default_factory=dict)
 
 
 class LiveScanner:
@@ -362,6 +369,7 @@ class LiveScanner:
         live_config: LiveConfig = LiveConfig(),
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        research_archive: Optional[ResearchArchive] = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.source = source
@@ -395,6 +403,9 @@ class LiveScanner:
             scanner_config.market.atr_period + 2,
             scanner_config.market.realized_vol_period + 2,
             MIN_DAILY_BARS + 1,
+        )
+        self.research_archive = research_archive or ResearchArchive(
+            self.output_dir / "research_archive.sqlite3"
         )
         self.fetcher = ThrottledCandleFetcher(
             source=source, min_gap_seconds=live_config.min_gap_seconds,
@@ -503,8 +514,9 @@ class LiveScanner:
 
     def tick(self, as_of: datetime, refresh_candles: bool) -> None:
         """Run one scan. A failure is recorded, never written as a partial panel."""
+        did_refresh_candles = refresh_candles or not self.symbols
         try:
-            if refresh_candles or not self.symbols:
+            if did_refresh_candles:
                 # Only the admitted subset is ever published as scannable.
                 self.symbols = self._refresh_candles(self._refresh_universe(), as_of)
             mids = {
@@ -521,6 +533,27 @@ class LiveScanner:
                 contexts=self._market_contexts,
             )
             rows = scan_assets(panel, as_of, self.scanner_config)
+            if did_refresh_candles:
+                current_factor_config = config_for_factor_model(
+                    self.scanner_config, CURRENT_FACTOR_MODEL
+                )
+                current_factor_rows = (
+                    rows
+                    if current_factor_config == self.scanner_config
+                    else scan_assets(panel, as_of, current_factor_config)
+                )
+                broad_config = config_for_factor_model(
+                    self.scanner_config, BROAD_ALT_FACTOR_MODEL
+                )
+                broad_rows = scan_assets(panel, as_of, broad_config)
+                self.research_archive.record(
+                    panel,
+                    {
+                        CURRENT_FACTOR_MODEL: current_factor_rows,
+                        BROAD_ALT_FACTOR_MODEL: broad_rows,
+                    },
+                    self.scanner_config,
+                )
             snapshot = scan_snapshot(as_of, rows, self.scanner_config)
             self._publish(snapshot)
             self.prior_prices = {symbol: asset.price for symbol, asset in panel.items()}
@@ -533,7 +566,7 @@ class LiveScanner:
             self._failures = 0
             self._error = None
             self._last_tick = as_of
-            if refresh_candles:
+            if did_refresh_candles:
                 self._last_candle_refresh = as_of
 
     def _publish(self, snapshot: Mapping[str, Any]) -> None:
@@ -548,6 +581,8 @@ class LiveScanner:
         append_history(history_path, events)
 
     def status(self) -> LiveStatus:
+        archive = asdict(self.research_archive.status())
+        archive["path"] = Path(archive["path"]).name
         with self._lock:
             return LiveStatus(
                 running=self._thread is not None and self._thread.is_alive(),
@@ -562,6 +597,7 @@ class LiveScanner:
                 consecutive_failures=self._failures,
                 last_error=self._error,
                 excluded_symbols=dict(self._excluded),
+                research_archive=archive,
             )
 
     # -- threading --------------------------------------------------------

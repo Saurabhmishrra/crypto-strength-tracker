@@ -30,6 +30,7 @@ The immediate objective is to answer a narrower question honestly: *do persisten
 - Fixture-driven scanner CLI that writes an atomic JSON snapshot and lightweight static HTML report.
 - A read-only live loop over public Hyperliquid data, and a local research cockpit that draws the structure instead of naming it.
 - A point-in-time historical event generator and chronological outcome report for testing the frozen completed-close rule without silently using future data.
+- A durable SQLite research archive written only at completed-bar refreshes. It stores deduplicated intraday/daily candles, point-in-time panel membership and context, per-model availability, and observations plus transitions for H1, D1, H5, B1, and H6.
 - Research-only collection of impact spread, a candle-derived relative-notional proxy, funding, open interest, and market breadth. None enters the score until it improves untouched out-of-sample results.
 
 ## Quick start
@@ -119,8 +120,8 @@ falls back to `unreachable` once `/api/snapshot` starts answering 503.
 
 Nothing in the loop can retry its way out of this; the write is genuinely denied. Keeping
 the launching terminal open also works, but the path above survives however it is started.
-`--output` only moves the snapshot and the signal history, both of which are gitignored —
-no source or committed file moves with it.
+`--output` only moves the snapshot, signal history, and SQLite research archive. All are
+gitignored; no source or committed file moves with them.
 
 The loop is public-data only: it selects a universe from `metaAndAssetCtxs` and reads
 candles. There is no private endpoint, no signing code, and no order path. Note that the
@@ -145,8 +146,8 @@ On Railway, `railway.json` builds the same Dockerfile and sets the health check;
 not in the file and have to be set in the dashboard:
 
 - **Turn serverless / app sleeping OFF.** A sleeping service is a stopped loop.
-- **Attach a volume mounted at `/data`,** or the transitions history restarts
-  empty on every deploy. Railway mounts volumes root-owned while this image runs
+- **Attach a volume mounted at `/data`,** or the transitions and research archive
+  restart empty on every deploy. Railway mounts volumes root-owned while this image runs
   as an unprivileged user, so if the first deploy exits with `cannot write to
   /data`, that is the cause and the message is deliberate — see below.
 
@@ -161,8 +162,10 @@ stopped scanning, and the page goes on serving an increasingly stale snapshot.
 `auto_stop_machines = false` and `min_machines_running = 1` are load-bearing.
 
 **Mount a volume at `/data`.** The snapshot is disposable; `signal_history.jsonl`
-is not. It is the only record of what the scanner said at the time, and without
-a volume it restarts empty on every release.
+and `research_archive.sqlite3` are not. The SQLite archive stores completed candle
+history, actual panel membership and context at each close, every active five-model
+observation, and non-spamming state transitions. Without a volume, both histories
+restart empty on every release.
 
 **A denied write stops the process at startup**, naming the directory, rather
 than failing on every tick from inside the refresh thread. That distinction

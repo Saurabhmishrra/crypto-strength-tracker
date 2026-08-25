@@ -123,10 +123,21 @@ the event direction, so a report can audit the rule without reconstructing its l
 The suite evaluator computes all rules using a given factor model from one scan per
 timestamp, so H1, D1, H5, and B1 cannot diverge because of separately rebuilt panels.
 
+The live loop writes `research_archive.sqlite3` only after a completed candle refresh.
+The transaction contains deduplicated intraday and daily candles, the actual selected
+panel and timestamped market context, active observations for all five frozen models,
+one evaluation record per model with usable and factor-available row counts, and their
+activation, change, and clearing events. This makes a genuine zero-signal hour distinct
+from an unavailable broad-alt factor. The first state ever seen for a model
+is marked `seeded`, not `activated`, because its true start may predate the archive.
+Current active states survive process restarts, and a repeated completed bar is
+idempotent. An archive failure fails the whole refresh instead of silently publishing a
+snapshot with a hole in its research history.
+
 This mechanism prevents the obvious future-panel leak, but it cannot make a current
-metadata value historical. Spread, funding, and OI therefore require a genuinely
-timestamped archive or a point-in-time callback; missing historical values remain
-`null` and are never backfilled from today's state.
+metadata value historical before archival began. From this release onward, spread,
+funding, OI, panel membership, and candle data are timestamped at each completed refresh;
+earlier missing values remain `null` and are never backfilled from today's state.
 
 ## Result — the persistence gate has nothing to calibrate (2026-08-25)
 

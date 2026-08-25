@@ -171,6 +171,7 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
   <div class="stat"><u>Universe</u><b id="count">—</b></div>
   <div class="stat"><u>Confirmed / provisional</u><b id="cands">—</b></div>
   <div class="stat"><u>Quality flags</u><b id="flags">—</b></div>
+  <div class="stat"><u>Research archive</u><b id="archive">—</b></div>
   <div class="stat"><u>Next candles</u><b id="nextRefresh">—</b></div>
 </div><div class="fault" id="fault" role="alert" hidden></div></header>
 
@@ -738,6 +739,8 @@ function renderHealth(){
   $('cands').textContent = snap ? confirmed + ' / ' + provisional : '—';
   const f = rows().filter(r => (r.rs.quality_flags || []).length).length;
   $('flags').innerHTML = snap ? (f ? `<span class="warn">${f}</span>` : '0') : '—';
+  const archive = status && status.research_archive;
+  $('archive').textContent = archive ? archive.scans + ' bars' : '—';
   $('nextRefresh').textContent = status && status.next_candle_refresh ? until(status.next_candle_refresh) : '—';
   /* An old snapshot presented as current is worse than no snapshot: desaturate
      the whole surface so staleness cannot be mistaken for a quiet market. */

@@ -421,6 +421,15 @@ class LiveScannerTests(unittest.TestCase):
         self.scanner.tick(self.as_of, refresh_candles=False)
         self.assertEqual(self.source.calls, [])
 
+    def test_only_a_completed_candle_refresh_enters_the_research_archive(self):
+        self.scanner.tick(self.as_of, refresh_candles=True)
+        first = self.scanner.status().research_archive
+        self.assertEqual(first["scans"], 1)
+        self.assertGreater(first["candles"], 0)
+        self.assertEqual(first["path"], "research_archive.sqlite3")
+        self.scanner.tick(self.as_of + timedelta(minutes=1), refresh_candles=False)
+        self.assertEqual(self.scanner.status().research_archive["scans"], 1)
+
     def test_each_tick_captures_its_prices_for_the_next_tick(self):
         """Paired with BuildPanelTests, this is what makes fresh R1/S1 crosses detectable."""
         self.assertEqual(self.scanner.prior_prices, {})
@@ -440,6 +449,37 @@ class LiveScannerTests(unittest.TestCase):
         self.assertEqual(status.consecutive_failures, 1)
         self.assertIn("endpoint down", status.last_error or "")
         self.assertEqual(self._snapshot(), original)
+
+    def test_an_archive_failure_cannot_publish_a_snapshot_with_a_history_hole(self):
+        from terra_cpr.live import LiveConfig, LiveScanner
+        from terra_cpr.research_archive import ResearchArchiveStatus
+
+        class FailingArchive:
+            def record(self, *_args, **_kwargs):
+                raise OSError("archive disk full")
+
+            def status(self):
+                return ResearchArchiveStatus(
+                    path="research_archive.sqlite3", schema_version=1,
+                    last_completed_bar=None, scans=0, candles=0, panel_rows=0,
+                    evaluations=0, observations=0, events=0, active_states=0,
+                    models={},
+                )
+
+        scanner = LiveScanner(
+            output_dir=self.output,
+            source=self.source,
+            live_config=LiveConfig(
+                universe_size=3, hourly_window=50, daily_window=10
+            ),
+            sleep=self.clock.sleep,
+            monotonic=self.clock.monotonic,
+            research_archive=FailingArchive(),
+        )
+        scanner.tick(self.as_of, refresh_candles=True)
+        self.assertFalse((self.output / "scanner_latest.json").exists())
+        self.assertEqual(scanner.status().consecutive_failures, 1)
+        self.assertIn("archive disk full", scanner.status().last_error or "")
 
     def test_a_successful_tick_clears_the_failure_counter(self):
         self.source.fail_with = RuntimeError("transient")
