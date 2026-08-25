@@ -128,6 +128,7 @@ class RelativeStrength:
     horizon_excess_return: Mapping[str, Optional[float]] = field(default_factory=dict)
     horizon_percentile: Mapping[str, Optional[float]] = field(default_factory=dict)
     model_version: str = "legacy"
+    discovery_score: Optional[float] = None
 
     @property
     def is_usable(self) -> bool:
@@ -143,6 +144,7 @@ class SetupAssessment:
     blockers: tuple[str, ...]
     confirmation: str = "NONE"
     confirmation_price: Optional[float] = None
+    discovery_tier: str = "NONE"
 
 
 @dataclass(frozen=True)

@@ -70,53 +70,57 @@ def _write_backtest(args) -> None:
         config.rs.medium_horizon_bars,
         math.ceil(3 * 86_400 / interval),
     })
+    event_rules = getattr(args, "event_rule", None) or ["confirmed_candidate"]
     results = []
-    for horizon in horizons:
-        events = generate_point_in_time_events(
-            assets,
-            config,
-            horizon_bars=horizon,
-            universe_size=args.universe,
-        )
-        train, test = chronological_split(events, args.train_fraction)
-        results.append({
-            "horizon_bars": horizon,
-            "horizon_seconds": horizon * interval,
-            "event_count": len(events),
-            "asset_return": {
-                "all": asdict(evaluate(events, args.cost_bps)),
-                "train": asdict(evaluate(train, args.cost_bps)),
-                "test": asdict(evaluate(test, args.cost_bps)),
-            },
-            "btc_beta_adjusted_return": {
-                "all": asdict(evaluate(
-                    events, args.cost_bps, outcome="btc_beta_adjusted"
-                )),
-                "train": asdict(evaluate(
-                    train, args.cost_bps, outcome="btc_beta_adjusted"
-                )),
-                "test": asdict(evaluate(
-                    test, args.cost_bps, outcome="btc_beta_adjusted"
-                )),
-            },
-            "model_factor_adjusted_return": {
-                "all": asdict(evaluate(
-                    events, args.cost_bps, outcome="model_factor_adjusted"
-                )),
-                "train": asdict(evaluate(
-                    train, args.cost_bps, outcome="model_factor_adjusted"
-                )),
-                "test": asdict(evaluate(
-                    test, args.cost_bps, outcome="model_factor_adjusted"
-                )),
-            },
-            "events": [asdict(event) for event in events],
-        })
+    for event_rule in event_rules:
+        for horizon in horizons:
+            events = generate_point_in_time_events(
+                assets,
+                config,
+                horizon_bars=horizon,
+                universe_size=args.universe,
+                event_rule=event_rule,
+            )
+            train, test = chronological_split(events, args.train_fraction)
+            results.append({
+                "event_rule": event_rule,
+                "horizon_bars": horizon,
+                "horizon_seconds": horizon * interval,
+                "event_count": len(events),
+                "asset_return": {
+                    "all": asdict(evaluate(events, args.cost_bps)),
+                    "train": asdict(evaluate(train, args.cost_bps)),
+                    "test": asdict(evaluate(test, args.cost_bps)),
+                },
+                "btc_beta_adjusted_return": {
+                    "all": asdict(evaluate(
+                        events, args.cost_bps, outcome="btc_beta_adjusted"
+                    )),
+                    "train": asdict(evaluate(
+                        train, args.cost_bps, outcome="btc_beta_adjusted"
+                    )),
+                    "test": asdict(evaluate(
+                        test, args.cost_bps, outcome="btc_beta_adjusted"
+                    )),
+                },
+                "model_factor_adjusted_return": {
+                    "all": asdict(evaluate(
+                        events, args.cost_bps, outcome="model_factor_adjusted"
+                    )),
+                    "train": asdict(evaluate(
+                        train, args.cost_bps, outcome="model_factor_adjusted"
+                    )),
+                    "test": asdict(evaluate(
+                        test, args.cost_bps, outcome="model_factor_adjusted"
+                    )),
+                },
+                "events": [asdict(event) for event in events],
+            })
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "as_of": as_of.isoformat(),
         "bar_interval_seconds": interval,
-        "model_version": "robust_ewma_empirical_v1",
+        "model_version": "robust_ewma_empirical_discovery_v2",
         "round_trip_cost_bps": args.cost_bps,
         "train_fraction": args.train_fraction,
         "warning": (
@@ -127,7 +131,7 @@ def _write_backtest(args) -> None:
     }
     write_json_atomic(args.output, report)
     counts = ", ".join(
-        f"{result['horizon_bars']} bars={result['event_count']}"
+        f"{result['event_rule']}:{result['horizon_bars']} bars={result['event_count']}"
         for result in results
     )
     print(f"wrote point-in-time research report to {args.output}; {counts}")
@@ -180,6 +184,11 @@ def main() -> None:
     backtest.add_argument(
         "--universe", type=int,
         help="point-in-time notional-volume universe size",
+    )
+    backtest.add_argument(
+        "--event-rule", action="append",
+        choices=("confirmed_candidate", "early_discovery", "strong_discovery"),
+        help="event rule to evaluate; repeat to compare predeclared rules",
     )
     backtest.add_argument(
         "--cost-bps", type=float, default=10.0,

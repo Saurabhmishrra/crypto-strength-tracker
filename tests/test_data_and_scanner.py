@@ -110,6 +110,30 @@ class DataAndScannerTests(unittest.TestCase):
         self.assertEqual(provisional.confirmation, "PROVISIONAL")
         self.assertEqual(confirmed.confirmation, "CONFIRMED")
 
+    def test_discovery_tiers_use_persistence_free_score_without_creating_candidates(self) -> None:
+        market = SimpleNamespace(
+            active_cpr=SimpleNamespace(top=110.0, bottom=100.0),
+            pivots=SimpleNamespace(pivot=105.0, r1=115.0, s1=95.0),
+        )
+        early_rs = SimpleNamespace(
+            is_usable=True, score=1.0, discovery_score=2.7,
+            persistence=-1.0, quality_flags=(), reason=None,
+        )
+        strong_rs = SimpleNamespace(
+            is_usable=True, score=1.0, discovery_score=-3.2,
+            persistence=1.0, quality_flags=(), reason=None,
+        )
+        early = assess_setup("EARLY", 112.0, 111.0, market, early_rs, ScannerConfig())
+        strong = assess_setup("STRONG", 98.0, 99.0, market, strong_rs, ScannerConfig())
+        self.assertEqual((early.label, early.direction, early.discovery_tier), ("WATCH", "LONG", "EARLY_DISCOVERY"))
+        self.assertEqual((strong.label, strong.direction, strong.discovery_tier), ("WATCH", "SHORT", "STRONG_DISCOVERY"))
+        self.assertEqual(early.confirmation, "NONE")
+        self.assertEqual(strong.confirmation, "NONE")
+
+    def test_discovery_thresholds_are_ordered_below_the_candidate_gate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "early <= strong <= candidate"):
+            ScannerConfig(early_discovery_score=3.1, strong_discovery_score=3.0)
+
 
 class AtomicWriteTests(unittest.TestCase):
     """A failed publish must not sabotage the next one.

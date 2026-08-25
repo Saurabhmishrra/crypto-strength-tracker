@@ -36,6 +36,10 @@ def scan_snapshot(
             cpr["width"] = cpr["top"] - cpr["bottom"]
         payload_rows.append(payload)
     usable_scores = [float(row.rs.score) for row in rows if row.rs.is_usable]
+    discovery_scores = [
+        float(row.rs.discovery_score) for row in rows
+        if row.rs.is_usable and row.rs.discovery_score is not None
+    ]
     confirmed = [
         row for row in rows
         if row.setup.label.endswith("CANDIDATE")
@@ -60,16 +64,27 @@ def scan_snapshot(
         "median_rs_score": statistics.median(usable_scores) if usable_scores else None,
         "confirmed_candidates": len(confirmed),
         "provisional_candidates": len(provisional),
+        "early_discoveries": sum(
+            row.setup.discovery_tier == "EARLY_DISCOVERY" for row in rows
+        ),
+        "strong_discoveries": sum(
+            row.setup.discovery_tier == "STRONG_DISCOVERY" for row in rows
+        ),
+        "median_discovery_score": (
+            statistics.median(discovery_scores) if discovery_scores else None
+        ),
     }
     # The thresholds travel with the labels they produced. A snapshot that records
     # WATCH without recording the rule that made it WATCH cannot be audited later,
     # and a reader has no way to draw the gate it missed.
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "as_of": as_of.isoformat(),
         "gates": {
             "candidate_rs_score": config.candidate_rs_score,
             "candidate_persistence": config.candidate_persistence,
+            "early_discovery_score": config.early_discovery_score,
+            "strong_discovery_score": config.strong_discovery_score,
             "bar_interval_seconds": config.interval_seconds,
             "short_horizon_seconds": (
                 config.rs.short_horizon_bars * config.interval_seconds
@@ -82,7 +97,7 @@ def scan_snapshot(
             ),
         },
         "model_version": (
-            rows[0].rs.model_version if rows else "robust_ewma_empirical_v1"
+            rows[0].rs.model_version if rows else "robust_ewma_empirical_discovery_v2"
         ),
         "breadth": breadth,
         "rows": payload_rows,

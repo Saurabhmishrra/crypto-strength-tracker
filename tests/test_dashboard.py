@@ -16,9 +16,12 @@ from terra_cpr.dashboard import _Handler, dashboard_html, serve
 from terra_cpr.live import LiveStatus
 
 SNAPSHOT = {
-    "schema_version": 3,
+    "schema_version": 4,
     "as_of": "2026-08-07T05:00:00+00:00",
-    "gates": {"candidate_rs_score": 3.5, "candidate_persistence": 0.40},
+    "gates": {
+        "candidate_rs_score": 3.5, "candidate_persistence": 0.40,
+        "early_discovery_score": 2.5, "strong_discovery_score": 3.0,
+    },
     "rows": [{"symbol": "SOL", "setup": {"label": "WATCH"}}],
 }
 
@@ -252,6 +255,9 @@ class SafetyBoundary(unittest.TestCase):
             ("SHORT_CANDIDATE", "Short candidates"),
             ("LONG_WATCH", "Long watch"),
             ("SHORT_WATCH", "Short watch"),
+            ("EARLY_DISCOVERY", "Early discovery"),
+            ("STRONG_DISCOVERY", "Strong discovery"),
+            ("CANDIDATE_GRADE", "Candidate grade"),
             ("WATCH", "Watches"),
         ):
             with self.subTest(value=value):
@@ -262,6 +268,7 @@ class SafetyBoundary(unittest.TestCase):
         self.assertIn("function renderFilterCounts", html)
         self.assertIn("r.setup.label === 'WATCH' && r.setup.direction === 'LONG'", html)
         self.assertIn("r.setup.label === 'WATCH' && r.setup.direction === 'SHORT'", html)
+        self.assertIn("r.setup.discovery_tier === value", html)
         self.assertIn("No ${esc(emptyLabel)} are present in the current snapshot.", html)
 
 

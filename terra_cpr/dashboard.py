@@ -123,7 +123,7 @@ button{background:transparent;border:1px solid var(--rail);color:var(--dim);padd
 button:hover{border-color:var(--rail2);color:var(--ink)}
 button[aria-pressed=true]{border-color:var(--structure);color:var(--structure)}
 .scroll{overflow-x:auto}
-table{width:100%;border-collapse:collapse;min-width:920px}
+table{width:100%;border-collapse:collapse;min-width:1080px}
 th{text-align:left;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);font-weight:500;padding:0 10px 8px 0;white-space:nowrap}
 th.sortable{cursor:pointer} th.sortable:hover{color:var(--dim)}
 th[aria-sort] {color:var(--structure)}
@@ -178,7 +178,7 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
   <section class="board">
     <div class="panel">
       <h2>Cross-section</h2>
-      <p class="hint">Relative strength against current price location. Shaded corners are the candidate regions; a hollow dot has not cleared the persistence gate.</p>
+      <p class="hint">Frozen confirmed score against current price location. Shaded corners are the candidate regions; a hollow dot has not cleared the persistence gate.</p>
       <figure><div id="map"></div></figure>
       <div class="legend">
         <span><i style="background:var(--long)"></i>Long candidate</span>
@@ -189,8 +189,8 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
       </div>
     </div>
     <div class="panel">
-      <h2>Gates</h2>
-      <p class="hint">How many assets clear each condition on its own.</p>
+      <h2>Confirmed gates</h2>
+      <p class="hint">How many assets clear each frozen candidate condition on its own. Discovery tiers remain watches.</p>
       <div class="funnel" id="funnel"></div>
       <p class="binding" id="binding"></p>
       <h2 style="margin-top:22px">Signal queue</h2>
@@ -212,6 +212,9 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
       <button data-filter="SHORT_CANDIDATE" data-label="Short candidates" aria-pressed="false">Short candidates (&hellip;)</button>
       <button data-filter="LONG_WATCH" data-label="Long watch" aria-pressed="false">Long watch (&hellip;)</button>
       <button data-filter="SHORT_WATCH" data-label="Short watch" aria-pressed="false">Short watch (&hellip;)</button>
+      <button data-filter="EARLY_DISCOVERY" data-label="Early discovery" aria-pressed="false">Early discovery (&hellip;)</button>
+      <button data-filter="STRONG_DISCOVERY" data-label="Strong discovery" aria-pressed="false">Strong discovery (&hellip;)</button>
+      <button data-filter="CANDIDATE_GRADE" data-label="Candidate grade" aria-pressed="false">Candidate grade (&hellip;)</button>
       <button data-filter="CONFIRMED" data-label="Confirmed" aria-pressed="false">Confirmed (&hellip;)</button>
       <button data-filter="PROVISIONAL" data-label="Provisional" aria-pressed="false">Provisional (&hellip;)</button>
       <button data-filter="WATCH" data-label="Watches" aria-pressed="false">Watches (&hellip;)</button>
@@ -221,7 +224,8 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
       <thead><tr>
         <th class="sortable" data-sort="symbol">Asset</th>
         <th class="sortable" data-sort="structure">Structure &plusmn;1.5 ATR</th>
-        <th class="sortable" data-sort="score">Relative strength</th>
+        <th class="sortable" data-sort="score">Confirmed score</th>
+        <th class="sortable" data-sort="discovery">Discovery score</th>
         <th class="sortable" data-sort="persistence">Persistence</th>
         <th class="sortable" data-sort="width">CPR width</th>
         <th>Setup</th>
@@ -265,7 +269,7 @@ function until(iso){
 /* ---------- derived read-only views of the snapshot ---------- */
 /* Defaults only. The snapshot records the thresholds that produced its labels,
    so a non-default config draws its own gates rather than these. */
-let RS_GATE = 3.5, P_GATE = 0.40;
+let RS_GATE = 3.5, P_GATE = 0.40, EARLY_GATE = 2.5, STRONG_GATE = 3.0;
 const rows = () => (snap && snap.rows) || [];
 const scored = () => rows().filter(r =>
   r.rs.score != null && !(r.rs.quality_flags || []).includes('stale_or_misaligned')
@@ -341,7 +345,8 @@ function renderMap(){
 function showTip(e, symbol){
   const r = rows().find(x => x.symbol === symbol); if (!r) return;
   const t = $('tip');
-  t.innerHTML = `<b>${esc(r.symbol)}</b><div>RS ${n(r.rs.score)} &middot; persistence ${n(r.rs.persistence)}</div>
+  t.innerHTML = `<b>${esc(r.symbol)}</b><div>Confirmed ${n(r.rs.score)} &middot; discovery ${n(r.rs.discovery_score)}</div>
+    <div>Persistence ${n(r.rs.persistence)} &middot; ${words(r.setup.discovery_tier || 'NONE')}</div>
     <div>${words(r.market.price_cpr_position)} &middot; ${n(bandATR(r))} ATR</div>
     <div class="${tone(r)}">${words(r.setup.confirmation || '')} ${words(r.setup.label)}</div>`;
   t.dataset.show = 'true';
@@ -454,6 +459,22 @@ function track(value, gate, max, w = 132, h = 16){
   return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${p.join('')}</svg>`;
 }
 
+function discoveryTrack(value, w = 132, h = 16){
+  if (value == null) return track(value, STRONG_GATE, 10, w, h);
+  const cy = h / 2, at = v => (Math.max(-10, Math.min(10, v)) + 10) / 20 * w;
+  const tier = Math.abs(value) >= STRONG_GATE ? 'strong' : Math.abs(value) >= EARLY_GATE ? 'early' : 'none';
+  const c = tier === 'none' ? 'var(--dim)' : value > 0 ? 'var(--long)' : 'var(--short)';
+  const p = [`<line x1="0" y1="${cy}" x2="${w}" y2="${cy}" stroke="var(--rail)" stroke-width="3"/>`];
+  p.push(`<line x1="${at(0)}" y1="${cy}" x2="${at(value)}" y2="${cy}" stroke="${c}" stroke-width="3"/>`);
+  for (const g of [-STRONG_GATE, -EARLY_GATE, EARLY_GATE, STRONG_GATE]) {
+    const strong = Math.abs(g) === STRONG_GATE;
+    p.push(`<line x1="${at(g)}" y1="${cy - (strong ? 5 : 3)}" x2="${at(g)}" y2="${cy + (strong ? 5 : 3)}" stroke="var(--structure)" stroke-width="1" opacity="${strong ? '.8' : '.45'}"/>`);
+  }
+  p.push(`<line x1="${at(0)}" y1="${cy - 4}" x2="${at(0)}" y2="${cy + 4}" stroke="var(--faint)" stroke-width="1"/>`);
+  p.push(`<circle cx="${at(value)}" cy="${cy}" r="3.2" fill="${c}"/>`);
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-label="Discovery score ${value}, early gate ${EARLY_GATE}, strong gate ${STRONG_GATE}">${p.join('')}</svg>`;
+}
+
 /* ---------- gate funnel ---------- */
 function renderFunnel(){
   const all = scored(), total = all.length || 1;
@@ -507,6 +528,7 @@ function matchesFilter(r, value){
   if (value === 'PROVISIONAL') return r.setup.confirmation === 'PROVISIONAL';
   if (value === 'LONG_WATCH') return r.setup.label === 'WATCH' && r.setup.direction === 'LONG';
   if (value === 'SHORT_WATCH') return r.setup.label === 'WATCH' && r.setup.direction === 'SHORT';
+  if (value === 'EARLY_DISCOVERY' || value === 'STRONG_DISCOVERY' || value === 'CANDIDATE_GRADE') return r.setup.discovery_tier === value;
   return r.setup.label === value;
 }
 function renderFilterCounts(){
@@ -524,6 +546,7 @@ function visible(){
   }).sort((a, b) => {
     const get = r => sort === 'symbol' ? r.symbol
       : sort === 'persistence' ? (r.rs.persistence == null ? -9 : r.rs.persistence)
+      : sort === 'discovery' ? (r.rs.discovery_score == null ? -99 : r.rs.discovery_score)
       : sort === 'width' ? (r.market.cpr_width_percentile == null ? -1 : r.market.cpr_width_percentile)
       : sort === 'structure' ? (bandATR(r) == null ? -9 : bandATR(r))
       : (r.rs.score == null ? -99 : r.rs.score);
@@ -540,13 +563,14 @@ function renderTable(){
       <td><div class="sym">${esc(r.symbol)}</div><div class="rank">${r.strong_rank == null ? '&mdash;' : '#' + r.strong_rank}</div></td>
       <td>${structureTrack(r, 132, 18)}<span class="rank">${n(bandATR(r))} ATR ${words(r.market.price_cpr_position)}</span></td>
       <td>${track(r.rs.score, RS_GATE, 10)}<span class="rank">${n(r.rs.score)}</span></td>
+      <td>${discoveryTrack(r.rs.discovery_score)}<span class="rank">${n(r.rs.discovery_score)} &middot; ${words(r.setup.discovery_tier || 'NONE')}</span></td>
       <td>${track(r.rs.persistence, P_GATE, 1)}<span class="rank">${n(r.rs.persistence)}</span></td>
       <td><span class="${r.market.cpr_regime === 'wide' ? 'blocked' : ''}">${esc(r.market.cpr_regime)}</span>
           <span class="rank">${r.market.cpr_width_percentile == null ? '&mdash;' : Math.round(r.market.cpr_width_percentile * 100) + 'pct'}</span></td>
       <td><span class="tag ${tone(r)}">${r.setup.confirmation && r.setup.confirmation !== 'NONE' ? words(r.setup.confirmation) + ' ' : ''}${words(r.setup.label)}</span>
           ${(r.rs.quality_flags || []).length ? `<span class="rank blocked"> ${(r.rs.quality_flags || []).length} flag</span>` : ''}</td>
     </tr>`).join('')
-    : `<tr><td colspan="6" class="empty prose">No ${esc(emptyLabel)} are present in the current snapshot.</td></tr>`;
+    : `<tr><td colspan="7" class="empty prose">No ${esc(emptyLabel)} are present in the current snapshot.</td></tr>`;
   $('rows').querySelectorAll('tr[data-symbol]').forEach(tr => {
     tr.addEventListener('click', () => open(tr.dataset.symbol));
     tr.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(tr.dataset.symbol); } });
@@ -582,14 +606,12 @@ function horizonDetails(rs){
   }).join('');
 }
 
-/* ---------- which gate is actually stopping this asset ----------
-   assess_setup records a blocker for the structure leg only, so an asset held
-   back purely by persistence arrives with an empty blockers list. These three
-   lines restate the published numbers against the published thresholds; they do
-   not re-derive the label, which is read from the snapshot as written. */
+/* ---------- which confirmed gate is stopping this asset ----------
+   These lines restate published values against the thresholds that travelled
+   with the snapshot. Discovery labels are never re-derived in the dashboard. */
 function gateVerdict(r){
   if (r.rs.score == null || r.rs.persistence == null) return '';
-  const dir = r.rs.score >= 0 ? 1 : -1;
+  const dir = r.setup.direction === 'LONG' ? 1 : r.setup.direction === 'SHORT' ? -1 : r.rs.score >= 0 ? 1 : -1;
   const confirmationPrice = r.setup.confirmation === 'CONFIRMED' ? r.setup.confirmation_price : r.market.price;
   const cpr = r.market.active_cpr || {}, pivot = (r.market.pivots || {}).pivot;
   const pos = confirmationPrice == null ? 'unknown'
@@ -626,6 +648,9 @@ function open(symbol){
       </div>
       <div>
         <div class="sub">Relative strength &middot; empirical robust units</div>
+        <div class="kv"><span>Confirmed score</span><b>${n(rs.score)} &middot; gate ${n(RS_GATE)}</b></div>
+        <div class="kv"><span>Persistence-free discovery</span><b>${n(rs.discovery_score)} &middot; ${words(r.setup.discovery_tier || 'NONE')}</b></div>
+        <div class="kv"><span>Discovery thresholds</span><b>${n(EARLY_GATE)} early &middot; ${n(STRONG_GATE)} strong</b></div>
         ${horizons(rs)}
         ${horizonDetails(rs)}
         ${(rs.quality_flags || []).includes('low_beta_fit') ? `<p class="hint">Faded because the beta fit is weak — these residuals carry little information.</p>` : ''}
@@ -735,6 +760,8 @@ async function refresh(){
       if (s.gates){
         RS_GATE = s.gates.candidate_rs_score;
         P_GATE = s.gates.candidate_persistence;
+        EARLY_GATE = s.gates.early_discovery_score == null ? 2.5 : s.gates.early_discovery_score;
+        STRONG_GATE = s.gates.strong_discovery_score == null ? 3.0 : s.gates.strong_discovery_score;
       }
     }
     events = h || [];

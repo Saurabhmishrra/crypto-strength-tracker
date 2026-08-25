@@ -20,6 +20,8 @@ secondary_benchmark = "ETH"
 [decision]
 candidate_rs_score = 3.5
 candidate_persistence = 0.40
+early_discovery_score = 2.5
+strong_discovery_score = 3.0
 
 # Applies to `live` and `serve --live` only. Public market data, read-only.
 [live]

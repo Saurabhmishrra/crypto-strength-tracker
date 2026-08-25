@@ -77,11 +77,25 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(event.entry_price, closes[event.symbol][entry_open])
             self.assertEqual(event.exit_price, closes[event.symbol][exit_open])
             self.assertEqual(event.horizon_bars, 4)
+            self.assertEqual(event.event_rule, "confirmed_candidate")
             self.assertIsNotNone(event.benchmark_forward_return)
             self.assertIsNotNone(event.btc_beta_adjusted_forward_log_return)
             self.assertIsNotNone(event.model_factor_adjusted_forward_log_return)
             self.assertIn("relative_notional_volume", event.features)
             self.assertIn("positive_rs_breadth", event.features)
+            self.assertIn("discovery_score", event.features)
+
+    def test_discovery_event_rule_uses_the_persistence_free_threshold(self) -> None:
+        _, interval, assets = synthetic_demo_assets()
+        events = generate_point_in_time_events(
+            assets,
+            ScannerConfig(interval_seconds=interval),
+            horizon_bars=4,
+            event_rule="early_discovery",
+        )
+        self.assertGreater(len(events), 0)
+        self.assertTrue(all(event.event_rule == "early_discovery" for event in events))
+        self.assertTrue(all(abs(event.score or 0.0) >= 2.5 for event in events))
 
     def test_feature_buckets_keep_missing_values_explicit(self) -> None:
         events = [

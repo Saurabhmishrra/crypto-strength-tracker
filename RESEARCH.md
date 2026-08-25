@@ -19,6 +19,20 @@
 
 H1 is the only candidate allowed into a first implementation. H2–H4 are analysis slices, not extra filters, until their incremental value is demonstrated.
 
+### Predeclared discovery tiers
+
+The live scanner may surface persistence-free `WATCH` rows at absolute discovery scores
+of **2.5 (early)** and **3.0 (strong)**. The discovery score retains the frozen horizon
+and acceleration weights, removes the 15% persistence component, and rescales the
+remaining 85% to the same -10 to +10 display range.
+
+These tiers are not candidate rules and do not enter alerts or signal history. H1 remains
+frozen at a 3.5 confirmed composite score plus the signed 0.40 persistence and structure
+gates. This separation is deliberate: the persistence replay is null, but removing it
+from H1 would create an unregistered replacement hypothesis. Point-in-time event output
+records both scores so 2.5 and 3.0 can be compared chronologically without tuning them
+after seeing outcomes.
+
 ## Promotion gates
 
 Scanner label -> paper-trading candidate only if a frozen rule has all of:
@@ -50,7 +64,7 @@ after it improves rolling out-of-sample results and the final untouched holdout.
 ## Implemented research mechanics
 
 `generate_point_in_time_events` walks completed benchmark closes and rebuilds the data
-panel, volume-ranked universe, daily structure, factors, RS score, confirmation state,
+panel, volume-ranked universe, daily structure, factors, both RS scores, confirmation state,
 and breadth as they were knowable at that time. Candidate events are frozen before fixed
 4h/24h/3d outcomes are attached. The `backtest` CLI writes signed asset-return,
 event-time BTC-beta-adjusted, and full BTC + orthogonal-ETH residual metrics with a

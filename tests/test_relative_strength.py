@@ -8,7 +8,9 @@ from terra_cpr.models import Candle
 from terra_cpr.relative_strength import (
     RSConfig,
     _acceleration,
+    _discovery_score,
     _empirical_horizon,
+    _score,
     compute_relative_strength,
     estimate_robust_ewma_factor_model,
 )
@@ -50,6 +52,16 @@ class RelativeStrengthTests(unittest.TestCase):
         assert result.score is not None
         self.assertGreater(result.score, 3.0)
         self.assertGreater(result.persistence or 0.0, 0.4)
+        self.assertIsNotNone(result.discovery_score)
+
+    def test_discovery_score_excludes_persistence_but_confirmed_score_does_not(self) -> None:
+        horizons = {"short": 1.5, "medium": 2.0, "long": 2.5}
+        discovery = _discovery_score(horizons, acceleration=1.0)
+        self.assertEqual(discovery, 6.76)
+        self.assertNotEqual(
+            _score(horizons, persistence=-1.0, acceleration=1.0),
+            _score(horizons, persistence=1.0, acceleration=1.0),
+        )
 
     def test_high_beta_without_residual_strength_is_not_ranked_strong(self) -> None:
         alt, btc = panel(beta=2.2, alpha=0.0)

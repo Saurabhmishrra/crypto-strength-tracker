@@ -384,7 +384,7 @@ class LiveScannerTests(unittest.TestCase):
     def test_tick_writes_a_snapshot_with_a_row_per_non_benchmark_asset(self):
         self.scanner.tick(self.as_of, refresh_candles=True)
         snapshot = self._snapshot()
-        self.assertEqual(snapshot["schema_version"], 3)
+        self.assertEqual(snapshot["schema_version"], 4)
         self.assertEqual({row["symbol"] for row in snapshot["rows"]}, {"AAA", "BBB"})
 
     def test_snapshot_records_the_thresholds_that_produced_its_labels(self):
@@ -402,6 +402,8 @@ class LiveScannerTests(unittest.TestCase):
         gates = self._snapshot()["gates"]
         self.assertEqual(gates["candidate_rs_score"], 6.0)
         self.assertEqual(gates["candidate_persistence"], 0.7)
+        self.assertEqual(gates["early_discovery_score"], 2.5)
+        self.assertEqual(gates["strong_discovery_score"], 3.0)
         self.assertEqual(gates["bar_interval_seconds"], HOUR)
         self.assertEqual(gates["short_horizon_seconds"], 4 * HOUR)
 

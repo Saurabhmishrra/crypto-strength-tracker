@@ -428,6 +428,33 @@ def _score(
     return round(_clamp(10.0 * composite, -10.0, 10.0), 2)
 
 
+def _discovery_score(
+    horizons: Mapping[str, Optional[float]],
+    acceleration: Optional[float],
+) -> Optional[float]:
+    """Persistence-free score for early research discovery.
+
+    The confirmed-candidate score above is frozen for the original H1 rule.
+    Discovery deliberately excludes persistence because persistence already acts
+    as a hard confirmation gate and has not shown predictive value in replay.
+    The remaining frozen weights are rescaled from 0.85 to 1.00 so the output
+    keeps the familiar -10 to +10 range without changing their relative weights.
+    """
+    if (
+        any(horizons.get(name) is None for name in ("short", "medium", "long"))
+        or acceleration is None
+    ):
+        return None
+    norm = lambda value: _clamp(float(value) / 3.0, -1.0, 1.0)
+    composite = (
+        0.15 * norm(horizons["short"])
+        + 0.35 * norm(horizons["medium"])
+        + 0.30 * norm(horizons["long"])
+        + 0.05 * norm(acceleration)
+    ) / 0.85
+    return round(_clamp(10.0 * composite, -10.0, 10.0), 2)
+
+
 def compute_relative_strength(
     symbol: str,
     asset_bars: Sequence[Candle],
@@ -581,6 +608,7 @@ def compute_relative_strength(
     if beta.residual_volatility <= 1e-12:
         flags.append("near_zero_residual_volatility")
     score = _score(horizons, persistence, acceleration)
+    discovery_score = _discovery_score(horizons, acceleration)
     reason = None if score is not None else "insufficient usable variation for multi-horizon score"
     return RelativeStrength(
         symbol=symbol, benchmark=benchmark, as_of=as_of, score=score, beta=beta,
@@ -588,5 +616,6 @@ def compute_relative_strength(
         alignment_ratio=alignment_ratio, quality_flags=tuple(flags), reason=reason,
         horizon_excess_return=horizon_returns,
         horizon_percentile=horizon_percentiles,
-        model_version="robust_ewma_empirical_v1",
+        model_version="robust_ewma_empirical_discovery_v2",
+        discovery_score=discovery_score,
     )

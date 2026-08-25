@@ -27,6 +27,8 @@ class ScannerConfig:
     interval_seconds: int = 3600
     candidate_rs_score: float = 3.5
     candidate_persistence: float = 0.40
+    early_discovery_score: float = 2.5
+    strong_discovery_score: float = 3.0
     market: MarketStructureConfig = MarketStructureConfig()
     rs: RSConfig = RSConfig()
 
@@ -35,6 +37,16 @@ class ScannerConfig:
             raise ValueError(
                 "ScannerConfig interval_seconds must match RSConfig bar_interval_seconds"
             )
+        if not (
+            0.0 < self.early_discovery_score
+            <= self.strong_discovery_score
+            <= self.candidate_rs_score
+        ):
+            raise ValueError(
+                "discovery thresholds must satisfy 0 < early <= strong <= candidate"
+            )
+        if not 0.0 <= self.candidate_persistence <= 1.0:
+            raise ValueError("candidate_persistence must be in [0, 1]")
 
 
 def _crossed_up(price: float, prior: Optional[float], level: float) -> bool:
@@ -81,6 +93,10 @@ def assess_setup(
     short_regime = rs.score <= -config.candidate_rs_score and rs.persistence <= -config.candidate_persistence
     reasons: list[str] = []
     blockers: list[str] = []
+    discovery_score = getattr(rs, "discovery_score", None)
+    if discovery_score is None:
+        # Compatibility for callers that supply a lightweight RS test double.
+        discovery_score = rs.score
     strength = min(100.0, abs(rs.score) * 10.0)
 
     if long_regime and confirmed_side == "LONG":
@@ -97,6 +113,7 @@ def assess_setup(
         return SetupAssessment(
             "LONG_CANDIDATE", "LONG", strength, tuple(reasons), tuple(blockers),
             confirmation="CONFIRMED", confirmation_price=confirmed_price,
+            discovery_tier="CANDIDATE_GRADE",
         )
     if short_regime and confirmed_side == "SHORT":
         reasons.extend((
@@ -112,6 +129,7 @@ def assess_setup(
         return SetupAssessment(
             "SHORT_CANDIDATE", "SHORT", strength, tuple(reasons), tuple(blockers),
             confirmation="CONFIRMED", confirmation_price=confirmed_price,
+            discovery_tier="CANDIDATE_GRADE",
         )
 
     if long_regime and live_side == "LONG":
@@ -122,6 +140,7 @@ def assess_setup(
             "LONG_CANDIDATE", "LONG", strength, tuple(reasons),
             ("awaiting completed-bar confirmation",),
             confirmation="PROVISIONAL", confirmation_price=confirmed_price,
+            discovery_tier="CANDIDATE_GRADE",
         )
     if short_regime and live_side == "SHORT":
         reasons.extend(("persistent beta-adjusted weakness", "current mid below BC and pivot"))
@@ -131,6 +150,7 @@ def assess_setup(
             "SHORT_CANDIDATE", "SHORT", strength, tuple(reasons),
             ("awaiting completed-bar confirmation",),
             confirmation="PROVISIONAL", confirmation_price=confirmed_price,
+            discovery_tier="CANDIDATE_GRADE",
         )
 
     if rs.score >= config.candidate_rs_score:
@@ -139,15 +159,42 @@ def assess_setup(
             blockers.append("persistence has not cleared the long threshold")
         if live_side != "LONG" and confirmed_side != "LONG":
             blockers.append("neither current mid nor completed close has bullish structure")
-        return SetupAssessment("WATCH", "LONG", strength, tuple(reasons), tuple(blockers))
+        return SetupAssessment(
+            "WATCH", "LONG", strength, tuple(reasons), tuple(blockers),
+            discovery_tier="CANDIDATE_GRADE",
+        )
     if rs.score <= -config.candidate_rs_score:
         reasons.append("weak RS")
         if rs.persistence > -config.candidate_persistence:
             blockers.append("persistence has not cleared the short threshold")
         if live_side != "SHORT" and confirmed_side != "SHORT":
             blockers.append("neither current mid nor completed close has bearish structure")
-        return SetupAssessment("WATCH", "SHORT", strength, tuple(reasons), tuple(blockers))
-    return SetupAssessment("NEUTRAL", "NONE", strength, (), ("no persistent relative-strength regime",))
+        return SetupAssessment(
+            "WATCH", "SHORT", strength, tuple(reasons), tuple(blockers),
+            discovery_tier="CANDIDATE_GRADE",
+        )
+
+    discovery_strength = min(100.0, abs(discovery_score) * 10.0)
+    if abs(discovery_score) >= config.strong_discovery_score:
+        direction = "LONG" if discovery_score > 0 else "SHORT"
+        return SetupAssessment(
+            "WATCH", direction, discovery_strength,
+            ("strong persistence-free RS discovery",),
+            (f"confirmed candidate score has not cleared {config.candidate_rs_score:g}",),
+            discovery_tier="STRONG_DISCOVERY",
+        )
+    if abs(discovery_score) >= config.early_discovery_score:
+        direction = "LONG" if discovery_score > 0 else "SHORT"
+        return SetupAssessment(
+            "WATCH", direction, discovery_strength,
+            ("early persistence-free RS discovery",),
+            (f"confirmed candidate score has not cleared {config.candidate_rs_score:g}",),
+            discovery_tier="EARLY_DISCOVERY",
+        )
+    return SetupAssessment(
+        "NEUTRAL", "NONE", discovery_strength, (),
+        ("discovery score is below the early threshold",),
+    )
 
 
 def scan_assets(

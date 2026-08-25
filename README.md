@@ -4,8 +4,8 @@
 
 Strength Tracker is a research-first cryptocurrency relative-strength scanner. It separates broad
 BTC and ETH market exposure from token-specific strength using robust factor models, then combines
-residual momentum, persistence, CPR, and pivot structure to identify provisional and
-completed-bar-confirmed candidates.
+residual momentum, persistence, CPR, and pivot structure to identify early discoveries,
+provisional candidates, and completed-bar-confirmed candidates.
 
 The project includes a read-only Hyperliquid market-data loop, an explainable local dashboard, and a
 point-in-time historical event generator for out-of-sample research. It contains no account
@@ -24,6 +24,7 @@ The immediate objective is to answer a narrower question honestly: *do persisten
 
 - Daily CPR and floor-trader pivot calculations, normalized CPR-width percentile, Wilder ATR, realised volatility, level distances, and price/open location.
 - Robust EWMA beta versus BTC, optional orthogonal ETH factor, beta uncertainty, and multi-horizon relative strength standardised against each token's empirical rolling residual distribution.
+- A persistence-free discovery score with predeclared 2.5 early and 3.0 strong tiers. These are research watches only. The original 3.5 composite score, 0.40 persistence gate, and structure rule remain frozen for candidates.
 - Cross-sectional ranking and explainable CPR + RS labels, with live mid-price previews explicitly separated from completed-bar confirmations.
 - Fixture-driven scanner CLI that writes an atomic JSON snapshot and lightweight static HTML report.
 - A read-only live loop over public Hyperliquid data, and a local research cockpit that draws the structure instead of naming it.
@@ -47,6 +48,15 @@ python3 -m terra_cpr.cli backtest --input path/to/history.json --cost-bps 10 \
   --output output/research_report.json
 ```
 
+The default remains frozen H1. To compare the predeclared discovery tiers, repeat
+`--event-rule` without changing thresholds:
+
+```bash
+python3 -m terra_cpr.cli backtest --input path/to/history.json \
+  --event-rule confirmed_candidate --event-rule early_discovery \
+  --event-rule strong_discovery --output output/research_report.json
+```
+
 The report includes signed asset return (the feasibility/P&L view), event-time
 BTC-beta-adjusted forward log return, and the full BTC + orthogonal-ETH model residual
 return. It does not prove an edge by itself; rolling folds and a final untouched holdout
@@ -60,6 +70,19 @@ python3 -m terra_cpr.cli serve --output output --live --universe 60
 
 Open `http://127.0.0.1:8765`. See [`DASHBOARD.md`](DASHBOARD.md) for the signal semantics
 and what each visual encodes.
+
+The scanner exposes two score paths on the same -10 to +10 display range:
+
+- **Discovery score:** the existing short, medium, long, and acceleration components,
+  rescaled without persistence. Absolute scores of 2.5 and 3.0 create early and strong
+  `WATCH` tiers. They never create alerts or history events.
+- **Confirmed score:** the frozen original composite, including persistence. A candidate
+  still requires an absolute score of 3.5, signed persistence of at least 0.40, matching
+  structure, and then a completed close for `CONFIRMED` status.
+
+The split prevents an unvalidated persistence feature from suppressing discovery while
+avoiding a silent rewrite of H1. It does not establish that either discovery tier has
+predictive value.
 
 `--live` adds a **two-tier public-data loop**. Relative strength cannot change until the
 configured bar closes. The structure leg moves continuously, but a mid-price move creates

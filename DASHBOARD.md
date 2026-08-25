@@ -16,6 +16,11 @@ event. A `PROVISIONAL` candidate means the current mid is beyond structure while
 completed close is not; it is an early preview and never enters history. `WATCH`,
 `NEUTRAL`, and `INSUFFICIENT_DATA` never alert.
 
+`WATCH` contains three explicit discovery tiers. `EARLY_DISCOVERY` clears the
+persistence-free 2.5 score, `STRONG_DISCOVERY` clears 3.0, and `CANDIDATE_GRADE` clears
+the frozen 3.5 confirmed score but is still blocked by persistence, structure, or a
+completed close. The first two tiers are for earlier inspection only.
+
 An event is recorded only when a candidate first appears, changes side/type, or clears.
 Re-running a scan with an unchanged candidate does not spam the history. A "signal" is
 therefore a state transition in a frozen research rule, not a trade or a recommendation.
@@ -27,7 +32,7 @@ with its threshold marked — at every scale.
 
 | Element | What it encodes |
 | --- | --- |
-| **Cross-section** | relative strength (x) against ATR distance from the CPR band (y). The shaded corners are the candidate regions; the dashed rails are the thresholds. |
+| **Cross-section** | frozen confirmed score (x) against ATR distance from the CPR band (y). The shaded corners are the candidate regions; the dashed rails are the thresholds. |
 | **Structure track** | signed ATR distance from the band. The aqua block at the centre is the band drawn at its true ATR width, so a `tight` regime is a sliver and a `wide` one a slab. The hollow ring is the session open. |
 | **Pivot ladder** | all nine levels on an ATR axis, with each level's price. Upright only in the detail drawer, where it has the height to earn the geometry. |
 | **Horizon bars** | current 4h / 24h / 7d factor-adjusted return in empirical robust units on a shared ±3R axis. `R` is based on the token's rolling-horizon MAD scale, not Gaussian sigma. |
@@ -57,11 +62,11 @@ reactions.
 
 ## Why a label is what it is
 
-`assess_setup` records a blocker for the structure leg only, so an asset held back purely
-by persistence arrives with an empty `blockers` list. The detail drawer therefore shows
-all three gates explicitly, with each published number against the threshold it must
-clear. Those thresholds are read from the snapshot's `gates` block — the rule that
-produced a label travels with it — never hardcoded in the page.
+`assess_setup` records the discovery tier and all candidate blockers. The detail drawer
+shows the persistence-free discovery score separately from the frozen confirmed score,
+then shows all three candidate gates with each published number against its threshold.
+Those thresholds are read from the snapshot's `gates` block, so the rule that produced a
+label travels with it and is never inferred from dashboard defaults.
 
 The dashboard never recomputes or reinterprets a label. Every value is read from
 `scanner_latest.json` as the scanner wrote it.
