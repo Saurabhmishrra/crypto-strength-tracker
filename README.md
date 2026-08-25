@@ -15,7 +15,7 @@ The immediate objective is to answer a narrower question honestly: *do persisten
 
 ## Safety boundary
 
-- The reference project at `two_day_cpr_bot` is never imported, modified, or launched by this project.
+- The sibling reference project `two_day_cpr_bot` is never imported, modified, or launched by this project.
 - Strength Tracker only has public-market-data interfaces. There is no execution client, private key, or API-secret setting.
 - A `LONG_CANDIDATE` or `SHORT_CANDIDATE` is a research label, not an order instruction.
 - Adding paper trading is a separate, explicit phase after the hypotheses in [`RESEARCH.md`](RESEARCH.md) pass their gates.

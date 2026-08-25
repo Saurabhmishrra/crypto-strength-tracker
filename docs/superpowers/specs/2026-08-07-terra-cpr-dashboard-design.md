@@ -42,8 +42,8 @@ scope creep:
   no node_modules. Charts are hand-rolled SVG.
 - **Loopback only.** `serve()` binds `127.0.0.1` and gains no bind-address option.
 - **This project is self-contained.** All work lands under `Terra_CPR/`. Nothing is
-  written to, committed to, or read-modified in `two_day_cpr_bot`
-  or any sibling directory.
+  written to, committed to, or read-modified in the sibling reference project
+  `two_day_cpr_bot` or any other sibling directory.
 
 ---
 
