@@ -61,6 +61,45 @@ metadata value historical. Spread, funding, and OI therefore require a genuinely
 timestamped archive or a point-in-time callback; missing historical values remain
 `null` and are never backfilled from today's state.
 
+## Result — the persistence gate has nothing to calibrate (2026-08-25)
+
+The gate could not be recalibrated for the two-factor model, because 208 days of
+hourly bars say the statistic it gates on is noise. Recorded here so the finding
+outlives the session that produced it.
+
+**Setup.** 34 perps (32 plus both factors), 5,000 hourly bars each, replayed with
+the production estimator. Beta re-estimated every 24 bars from the trailing 720
+only; forward outcomes computed with the beta known at that point. 5,340
+observations over 172 sample points. Cross-sectional mean per bar, then a t-stat
+across bars, so cross-asset correlation cannot inflate significance the way
+pooling would. Costs charged at 10bps round trip.
+
+**Persistence is not one-sided more often than chance.** Under a no-persistence
+null, residual signs over 24 bars are Binomial(24, 0.5). Observed frequencies sit
+at or slightly below that null at every attainable cut, and fall further in the
+tail — 0.89x the null rate at 0.4167, 0.71x at 0.5000. Residual signs are, if
+anything, marginally *less* one-sided than coin flips.
+
+**No threshold predicts forward factor-adjusted return.** Sweeping five
+persistence windows (12–168 bars) x three horizons (24/72/168 bars) x seven
+thresholds gives 75 configurations. The largest |t| among them is **2.35** —
+lower than the ~2.6–3.0 one should expect as the maximum of 75 draws from pure
+noise. Selecting the best cell of that grid would be fitting the sampling error.
+
+**The one-factor and two-factor distributions are the same.** Mean |persistence|
+is 0.1548 one-factor, 0.1576 two-factor, against a 0.1612 null. An earlier
+8-symbol single-snapshot probe suggested the ETH factor had compressed
+persistence; over 208 days it does no such thing. That probe was one moment, not
+a distribution, and it was wrong.
+
+**Read this before relaxing the gate.** A trailing residual-momentum control run
+through the same harness is also null at 24h and 72h (t = +0.11, +0.15). That is
+the medium-horizon leg of the RS score, so this result is evidence about more
+than persistence: it says short-horizon factor-adjusted predictability is absent
+in this sample. Removing the persistence gate would stop blocking candidates, but
+nothing here establishes that what it was blocking is worth trading. The
+promotion gates above still apply, and this sample is one regime.
+
 ## Execution is not the next step
 
 The next validation is running the frozen generator on a broad point-in-time archive,
