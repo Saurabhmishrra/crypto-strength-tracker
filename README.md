@@ -102,6 +102,37 @@ than a 429, so an empty candle window is treated as retryable, never as "this ma
 no data" — reading it the other way would quietly shrink the panel and corrupt every
 cross-sectional rank computed from it.
 
+## Public deployment
+
+The dashboard binds loopback unless told otherwise. `--host 0.0.0.0` exposes it,
+and the shipped `Dockerfile` passes exactly that:
+
+```bash
+fly launch --no-deploy --name crypto-strength-tracker
+fly volumes create scanner_data --size 1 --region iad
+fly deploy
+```
+
+The container is the interpreter plus one package — no dependencies, no build
+step. Any host that runs a Dockerfile works; `fly.toml` is provided because the
+workload is unusual in one respect worth copying to whatever platform you use:
+
+**Scale-to-zero cannot be enabled.** The refresh loop lives inside the web
+process, so a machine stopped for lack of HTTP traffic is a scanner that has
+stopped scanning, and the page goes on serving an increasingly stale snapshot.
+`auto_stop_machines = false` and `min_machines_running = 1` are load-bearing.
+
+**Mount a volume at `/data`.** The snapshot is disposable; `signal_history.jsonl`
+is not. It is the only record of what the scanner said at the time, and without
+a volume it restarts empty on every release.
+
+What is exposed is read-only by construction: every route is GET, no route
+mutates anything, and the process holds no credential, signing code, or order
+path. `http.server` supplies neither TLS nor abuse handling, so the platform
+terminates TLS in front of it. The responses carry `nosniff`, `DENY` framing,
+`no-referrer`, and a `default-src 'none'` CSP regardless of what sits in front,
+and the server banner does not name the interpreter or its version.
+
 ## Data contract
 
 `scan` reads a JSON document containing one BTC benchmark and assets with daily and intraday candles. Timestamps must be ISO-8601 UTC or Unix milliseconds. Daily candles must contain **completed sessions only**; the current session price/open is supplied separately.

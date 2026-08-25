@@ -755,16 +755,38 @@ setInterval(renderHealth, 1000);
 </script></body></html>"""
 
 
+#: Every source the cockpit needs is inline in the document it arrives in, so
+#: the policy can deny by default and open only same-origin fetches for the
+#: three API routes. ``unsafe-inline`` is unavoidable while the style and script
+#: live in the page itself, which is the trade the zero-dependency design makes.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+    "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; "
+    "frame-ancestors 'none'"
+)
+
+
 class _Handler(BaseHTTPRequestHandler):
     output_dir: Path
     live_scanner: Any = None
+    #: The default banner names the exact Python patch version, which on a
+    #: public deployment is a free CVE list for anyone scanning.
+    server_version = "strength-tracker"
+    sys_version = ""
+
+    def _common_headers(self) -> None:
+        """Headers that must hold on every route, proxy or no proxy."""
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
 
     def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self._common_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -773,7 +795,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        self._common_headers()
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -827,21 +850,39 @@ class _Handler(BaseHTTPRequestHandler):
         """Avoid request noise; this is a local visualisation, not an audit log."""
 
 
-def serve(output_dir: Path, port: int = 8765, live_scanner: Any = None) -> None:
-    """Serve only on loopback. Do not add a non-local bind option here.
+def serve(
+    output_dir: Path,
+    port: int = 8765,
+    live_scanner: Any = None,
+    host: str = "127.0.0.1",
+) -> None:
+    """Serve the read-only dashboard, on loopback unless told otherwise.
 
     ``live_scanner`` is read for status only. No route starts, stops, or steps
     it: the refresh timer lives in the process, never in a request handler, so
     this surface stays structurally side-effect-free.
+
+    This bound loopback unconditionally until the scanner was deployed as a
+    public site. What protected it was never the bind address but the absence
+    of anything worth reaching: every route is GET, nothing mutates, and there
+    is no credential, order path, or writable endpoint in the process. That is
+    still true, so ``host`` is now an argument -- but it defaults to loopback,
+    because forgetting to think about exposure must not produce it.
+
+    ``http.server`` has no TLS and no abuse handling. A public bind assumes
+    something in front terminates TLS and absorbs load.
     """
     if not 1 <= port <= 65535:
         raise ValueError("port must be between 1 and 65535")
+    if not host or not host.strip():
+        raise ValueError("host must be a bind address")
     handler = type(
         "ScannerDashboardHandler", (_Handler,),
         {"output_dir": output_dir, "live_scanner": live_scanner},
     )
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
-    print(f"Strength Tracker dashboard: http://127.0.0.1:{port}")
+    server = ThreadingHTTPServer((host, port), handler)
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    print(f"Strength Tracker dashboard: http://{shown}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

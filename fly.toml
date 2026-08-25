@@ -1,0 +1,42 @@
+# Fly.io deployment for the public research cockpit.
+app = "crypto-strength-tracker"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # The refresh loop lives inside this process, so a stopped machine is a
+  # stopped scanner with a staling snapshot. Scale-to-zero is not available
+  # to this workload no matter how quiet the HTTP traffic gets.
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 100
+    hard_limit = 200
+
+# /health answers 200 whenever the HTTP surface is alive. Whether the loop is
+# healthy is a different question, answered by /api/status and drawn on the
+# page's own health rail.
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "90s"
+  method = "GET"
+  path = "/health"
+
+[[mounts]]
+  source = "scanner_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

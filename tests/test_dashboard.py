@@ -138,19 +138,64 @@ class StatusWithFailingLoop(_ServerCase):
         self.assertIn("endpoint down", payload["last_error"])
 
 
+class PublicExposureHardening(_ServerCase):
+    """Once this binds beyond loopback, the response is its own last defence.
+
+    ``http.server`` ships neither TLS nor abuse handling, so a deployment puts
+    a proxy in front of it. These headers are what holds regardless of which
+    proxy that turns out to be, or whether someone runs it without one.
+    """
+
+    def _headers(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=5) as response:
+            return dict(response.headers)
+
+    def test_no_route_may_be_sniffed_or_framed(self):
+        self._write_snapshot()
+        for path in ("/", "/api/snapshot", "/api/status"):
+            with self.subTest(path=path):
+                headers = self._headers(path)
+                self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+                self.assertEqual(headers.get("X-Frame-Options"), "DENY")
+                self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+
+    def test_the_page_declares_a_policy_that_forbids_remote_loading(self):
+        """The zero-dependency promise is enforced in the markup by review and
+        at runtime by this header. A public deployment needs both."""
+        policy = self._headers("/").get("Content-Security-Policy", "")
+        self.assertIn("default-src 'none'", policy)
+        self.assertIn("connect-src 'self'", policy)
+        self.assertIn("form-action 'none'", policy)
+
+    def test_the_server_does_not_advertise_what_it_runs(self):
+        """A banner naming Python and its exact patch version hands a scanner
+        the applicable CVE list for free."""
+        banner = self._headers("/").get("Server", "")
+        self.assertNotIn("Python", banner)
+        self.assertNotIn("BaseHTTP", banner)
+
+
 class SafetyBoundary(unittest.TestCase):
     def test_the_product_uses_the_strength_tracker_name(self):
         html = dashboard_html()
         self.assertIn("Strength Tracker", html)
         self.assertNotIn("Terra CPR", html)
 
-    def test_serve_exposes_no_bind_address_parameter(self):
-        """Binding beyond loopback must require editing the source, not a flag."""
-        parameters = set(inspect.signature(serve).parameters)
-        self.assertEqual(parameters, {"output_dir", "port", "live_scanner"})
+    def test_serve_binds_loopback_unless_told_otherwise(self):
+        """Public exposure must be a deliberate argument, never the default.
 
-    def test_serve_binds_loopback_in_its_source(self):
-        self.assertIn('"127.0.0.1"', inspect.getsource(serve))
+        The dashboard was loopback-only by construction until it was deployed
+        as a public site. What actually protected it was never the bind address
+        but that no route mutates anything; binding wider is now allowed, and
+        forgetting to ask for it still cannot expose a laptop.
+        """
+        self.assertEqual(inspect.signature(serve).parameters["host"].default, "127.0.0.1")
+
+    def test_serve_refuses_a_bind_address_it_cannot_honour(self):
+        for host in ("", "   "):
+            with self.subTest(host=host):
+                with self.assertRaises(ValueError):
+                    serve(Path("."), host=host)
 
     def test_the_page_loads_nothing_from_the_network(self):
         """Zero-dependency means zero: no CDN, font, image, or script host."""

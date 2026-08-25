@@ -40,7 +40,17 @@ scope creep:
 - **Zero dependencies.** `pyproject.toml` declares `dependencies = []`. Everything is
   stdlib Python and one self-contained HTML/CSS/JS document. No build step, no CDN,
   no node_modules. Charts are hand-rolled SVG.
-- **Loopback only.** `serve()` binds `127.0.0.1` and gains no bind-address option.
+- **Loopback by default.** `serve()` binds `127.0.0.1` unless a caller passes
+  `host` explicitly. This said "loopback only, and no bind option" until the
+  scanner was deployed as a public site. Recording why the rule changed rather
+  than deleting it: the property that protected this surface was never the bind
+  address but the absence of anything worth reaching — every route is GET,
+  nothing mutates, the refresh timer lives in the process rather than in a
+  handler, and there is no credential, order path, or writable endpoint. Those
+  still hold and are still tested. What a public bind genuinely adds is
+  exposure to load and to TLS-stripping, neither of which `http.server`
+  handles, so a deployment puts a proxy in front and the responses carry their
+  own hardening headers regardless.
 - **This project is self-contained.** All work lands under `Terra_CPR/`. Nothing is
   written to, committed to, or read-modified in the sibling reference project
   `two_day_cpr_bot` or any other sibling directory.

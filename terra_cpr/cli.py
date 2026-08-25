@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -188,9 +189,15 @@ def main() -> None:
     demo = subparsers.add_parser("demo", help="run deterministic synthetic plumbing demo")
     demo.add_argument("--output", type=Path, default=Path("output"))
     demo.add_argument("--config", type=Path, help="strict TOML scanner configuration")
-    serve_command = subparsers.add_parser("serve", help="start the loopback-only, read-only scanner dashboard")
+    serve_command = subparsers.add_parser("serve", help="start the read-only scanner dashboard")
     serve_command.add_argument("--output", type=Path, default=Path("output"))
-    serve_command.add_argument("--port", type=int, default=8765)
+    # Hosting platforms hand the port to the process rather than the operator.
+    serve_command.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8765)))
+    serve_command.add_argument(
+        "--host", default="127.0.0.1",
+        help="bind address; 0.0.0.0 exposes the dashboard beyond this machine "
+             "and assumes a TLS-terminating proxy in front of it",
+    )
     serve_command.add_argument("--live", action="store_true", help="also run the public-data refresh loop")
     _add_live_flags(serve_command)
     live_command = subparsers.add_parser("live", help="run the public-data refresh loop without a dashboard")
@@ -213,7 +220,7 @@ def main() -> None:
         if scanner is not None:
             scanner.start()
         try:
-            serve(args.output, args.port, live_scanner=scanner)
+            serve(args.output, args.port, live_scanner=scanner, host=args.host)
         finally:
             if scanner is not None:
                 scanner.stop()
