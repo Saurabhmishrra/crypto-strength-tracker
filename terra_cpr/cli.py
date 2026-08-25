@@ -137,8 +137,39 @@ def _write_backtest(args) -> None:
     print(f"wrote point-in-time research report to {args.output}; {counts}")
 
 
+def require_writable(output: Path) -> None:
+    """Refuse to start when the snapshot directory cannot be written.
+
+    A denied write here is not survivable: the loop republishes on every tick,
+    so it fails on all of them, and the page keeps serving the last good
+    snapshot while looking merely stale. That has now cost real time twice --
+    once when macOS revoked a detached process's grant to a protected
+    directory, and it is the expected first failure on a container volume,
+    which mounts root-owned while the image runs unprivileged. Name the
+    directory and stop, rather than reporting it 40 seconds later as an opaque
+    PermissionError from inside a thread.
+    """
+    probe = output / f".writable-probe-{os.getpid()}"
+    try:
+        output.mkdir(parents=True, exist_ok=True)
+        probe.write_text("")
+    except OSError as exc:
+        raise SystemExit(
+            f"cannot write to {output}: {exc}\n"
+            "The scanner publishes its snapshot and signal history there, so every "
+            "tick would fail. On a mounted volume this usually means the mount is "
+            "owned by root while this process runs unprivileged."
+        ) from exc
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+
+
 def _build_live_scanner(args) -> LiveScanner:
     """Assemble a live scanner from CLI flags, with the config file as the base."""
+    require_writable(args.output)
     scanner_config, live_config = (
         load_live_configs(args.config) if args.config else (ScannerConfig(), LiveConfig())
     )

@@ -136,9 +136,20 @@ fly volumes create scanner_data --size 1 --region iad
 fly deploy
 ```
 
+On Railway, `railway.json` builds the same Dockerfile and sets the health check;
+`PORT` is injected by the platform and the CLI reads it. Two service settings are
+not in the file and have to be set in the dashboard:
+
+- **Turn serverless / app sleeping OFF.** A sleeping service is a stopped loop.
+- **Attach a volume mounted at `/data`,** or the transitions history restarts
+  empty on every deploy. Railway mounts volumes root-owned while this image runs
+  as an unprivileged user, so if the first deploy exits with `cannot write to
+  /data`, that is the cause and the message is deliberate — see below.
+
 The container is the interpreter plus one package — no dependencies, no build
-step. Any host that runs a Dockerfile works; `fly.toml` is provided because the
-workload is unusual in one respect worth copying to whatever platform you use:
+step. Any host that runs a Dockerfile works; `fly.toml` and `railway.json` are
+both provided because the workload is unusual in one respect worth copying to
+whatever platform you use:
 
 **Scale-to-zero cannot be enabled.** The refresh loop lives inside the web
 process, so a machine stopped for lack of HTTP traffic is a scanner that has
@@ -148,6 +159,12 @@ stopped scanning, and the page goes on serving an increasingly stale snapshot.
 **Mount a volume at `/data`.** The snapshot is disposable; `signal_history.jsonl`
 is not. It is the only record of what the scanner said at the time, and without
 a volume it restarts empty on every release.
+
+**A denied write stops the process at startup**, naming the directory, rather
+than failing on every tick from inside the refresh thread. That distinction
+matters because the failure is otherwise invisible: the page keeps serving the
+last good snapshot and simply looks stale, which reads as a quiet feed rather
+than a broken deployment.
 
 What is exposed is read-only by construction: every route is GET, no route
 mutates anything, and the process holds no credential, signing code, or order

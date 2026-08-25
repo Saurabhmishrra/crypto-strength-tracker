@@ -274,3 +274,46 @@ class SafetyBoundary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutputDirectoryGuard(unittest.TestCase):
+    """A denied write must be reported at startup, not 40 seconds into the loop.
+
+    Twice now an unwritable output directory has surfaced as an opaque
+    PermissionError from inside the refresh loop, with a served page that
+    looked merely stale. Container volumes are mounted root-owned while the
+    image runs unprivileged, so this is the expected first failure on a fresh
+    deployment -- it should name the directory and stop.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = Path(self.tmp.name)
+
+    def test_a_writable_directory_passes_quietly(self):
+        from terra_cpr.cli import require_writable
+
+        require_writable(self.directory / "nested")
+        self.assertTrue((self.directory / "nested").is_dir())
+
+    def test_an_unwritable_directory_is_named_and_refused(self):
+        import os
+
+        from terra_cpr.cli import require_writable
+
+        locked = self.directory / "locked"
+        locked.mkdir()
+        os.chmod(locked, 0o500)
+        self.addCleanup(os.chmod, locked, 0o700)
+        if os.access(locked, os.W_OK):
+            self.skipTest("running as a user that ignores the mode bits")
+        with self.assertRaises(SystemExit) as caught:
+            require_writable(locked)
+        self.assertIn(str(locked), str(caught.exception))
+
+    def test_the_probe_leaves_nothing_behind(self):
+        from terra_cpr.cli import require_writable
+
+        require_writable(self.directory)
+        self.assertEqual(list(self.directory.iterdir()), [])
