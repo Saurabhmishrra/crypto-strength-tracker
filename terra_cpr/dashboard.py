@@ -207,13 +207,15 @@ svg{display:block;max-width:100%;height:auto;overflow:visible}
     <p class="hint">Select an asset to inspect its full calculation.</p>
     <div class="tools">
       <input type="search" id="q" placeholder="Filter symbol" aria-label="Filter by symbol">
-      <button data-filter="ALL" aria-pressed="true">All</button>
-      <button data-filter="LONG_CANDIDATE" aria-pressed="false">Long</button>
-      <button data-filter="SHORT_CANDIDATE" aria-pressed="false">Short</button>
-      <button data-filter="CONFIRMED" aria-pressed="false">Confirmed</button>
-      <button data-filter="PROVISIONAL" aria-pressed="false">Provisional</button>
-      <button data-filter="WATCH" aria-pressed="false">Watch</button>
-      <button data-filter="FLAGGED" aria-pressed="false">Flagged</button>
+      <button data-filter="ALL" data-label="All" aria-pressed="true">All (&hellip;)</button>
+      <button data-filter="LONG_CANDIDATE" data-label="Long candidates" aria-pressed="false">Long candidates (&hellip;)</button>
+      <button data-filter="SHORT_CANDIDATE" data-label="Short candidates" aria-pressed="false">Short candidates (&hellip;)</button>
+      <button data-filter="LONG_WATCH" data-label="Long watch" aria-pressed="false">Long watch (&hellip;)</button>
+      <button data-filter="SHORT_WATCH" data-label="Short watch" aria-pressed="false">Short watch (&hellip;)</button>
+      <button data-filter="CONFIRMED" data-label="Confirmed" aria-pressed="false">Confirmed (&hellip;)</button>
+      <button data-filter="PROVISIONAL" data-label="Provisional" aria-pressed="false">Provisional (&hellip;)</button>
+      <button data-filter="WATCH" data-label="Watches" aria-pressed="false">Watches (&hellip;)</button>
+      <button data-filter="FLAGGED" data-label="Flagged" aria-pressed="false">Flagged (&hellip;)</button>
     </div>
     <div class="scroll"><table>
       <thead><tr>
@@ -498,14 +500,27 @@ function renderFeed(){
 }
 
 /* ---------- universe table ---------- */
+function matchesFilter(r, value){
+  if (value === 'ALL') return true;
+  if (value === 'FLAGGED') return Boolean((r.rs.quality_flags || []).length);
+  if (value === 'CONFIRMED') return r.setup.confirmation === 'CONFIRMED';
+  if (value === 'PROVISIONAL') return r.setup.confirmation === 'PROVISIONAL';
+  if (value === 'LONG_WATCH') return r.setup.label === 'WATCH' && r.setup.direction === 'LONG';
+  if (value === 'SHORT_WATCH') return r.setup.label === 'WATCH' && r.setup.direction === 'SHORT';
+  return r.setup.label === value;
+}
+function renderFilterCounts(){
+  const all = rows();
+  document.querySelectorAll('[data-filter]').forEach(b => {
+    const count = all.filter(r => matchesFilter(r, b.dataset.filter)).length;
+    b.textContent = `${b.dataset.label} (${count})`;
+    b.setAttribute('aria-label', `${b.dataset.label}, ${count} assets`);
+  });
+}
 function visible(){
   const q = $('q').value.trim().toLowerCase();
   return rows().filter(r => {
-    if (filter === 'FLAGGED' ? !(r.rs.quality_flags || []).length
-      : filter === 'CONFIRMED' ? r.setup.confirmation !== 'CONFIRMED'
-      : filter === 'PROVISIONAL' ? r.setup.confirmation !== 'PROVISIONAL'
-      : filter !== 'ALL' && r.setup.label !== filter) return false;
-    return !q || r.symbol.toLowerCase().includes(q);
+    return matchesFilter(r, filter) && (!q || r.symbol.toLowerCase().includes(q));
   }).sort((a, b) => {
     const get = r => sort === 'symbol' ? r.symbol
       : sort === 'persistence' ? (r.rs.persistence == null ? -9 : r.rs.persistence)
@@ -518,6 +533,8 @@ function visible(){
 }
 function renderTable(){
   const list = visible();
+  const active = document.querySelector(`[data-filter="${filter}"]`);
+  const emptyLabel = active ? active.dataset.label.toLowerCase() : 'filter';
   $('rows').innerHTML = list.length ? list.map(r => `
     <tr tabindex="0" data-symbol="${esc(r.symbol)}" aria-selected="${r.symbol === selected}">
       <td><div class="sym">${esc(r.symbol)}</div><div class="rank">${r.strong_rank == null ? '&mdash;' : '#' + r.strong_rank}</div></td>
@@ -529,7 +546,7 @@ function renderTable(){
       <td><span class="tag ${tone(r)}">${r.setup.confirmation && r.setup.confirmation !== 'NONE' ? words(r.setup.confirmation) + ' ' : ''}${words(r.setup.label)}</span>
           ${(r.rs.quality_flags || []).length ? `<span class="rank blocked"> ${(r.rs.quality_flags || []).length} flag</span>` : ''}</td>
     </tr>`).join('')
-    : `<tr><td colspan="6" class="empty prose">Nothing matches this filter.</td></tr>`;
+    : `<tr><td colspan="6" class="empty prose">No ${esc(emptyLabel)} are present in the current snapshot.</td></tr>`;
   $('rows').querySelectorAll('tr[data-symbol]').forEach(tr => {
     tr.addEventListener('click', () => open(tr.dataset.symbol));
     tr.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(tr.dataset.symbol); } });
@@ -706,7 +723,7 @@ function renderHealth(){
 function render(){
   renderHealth();
   if (!snap) return;
-  renderMap(); renderFunnel(); renderQueue(); renderFeed(); renderTable();
+  renderMap(); renderFunnel(); renderQueue(); renderFeed(); renderFilterCounts(); renderTable();
 }
 
 async function refresh(){

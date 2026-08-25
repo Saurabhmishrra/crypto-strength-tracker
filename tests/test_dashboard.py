@@ -245,6 +245,25 @@ class SafetyBoundary(unittest.TestCase):
             with self.subTest(verb=verb):
                 self.assertNotIn(verb, html)
 
+    def test_candidate_and_watch_filters_are_distinct_and_counted(self):
+        html = dashboard_html()
+        for value, label in (
+            ("LONG_CANDIDATE", "Long candidates"),
+            ("SHORT_CANDIDATE", "Short candidates"),
+            ("LONG_WATCH", "Long watch"),
+            ("SHORT_WATCH", "Short watch"),
+            ("WATCH", "Watches"),
+        ):
+            with self.subTest(value=value):
+                self.assertIn(
+                    f'data-filter="{value}" data-label="{label}"', html
+                )
+        self.assertIn("function matchesFilter", html)
+        self.assertIn("function renderFilterCounts", html)
+        self.assertIn("r.setup.label === 'WATCH' && r.setup.direction === 'LONG'", html)
+        self.assertIn("r.setup.label === 'WATCH' && r.setup.direction === 'SHORT'", html)
+        self.assertIn("No ${esc(emptyLabel)} are present in the current snapshot.", html)
+
 
 if __name__ == "__main__":
     unittest.main()
