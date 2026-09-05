@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import random
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable, Iterable, Mapping, Optional, Sequence
@@ -78,8 +79,8 @@ class EventOutcome:
     timestamp: datetime
     symbol: str
     direction: str  # LONG or SHORT
-    gross_forward_return: float  # decimal asset return over a predetermined horizon
-    funding_cost: float = 0.0
+    gross_forward_return: float | None  # decimal asset return over a predetermined horizon
+    funding_cost: float | None = 0.0
     score: float | None = None
     entry_price: float | None = None
     exit_price: float | None = None
@@ -90,9 +91,13 @@ class EventOutcome:
     features: Mapping[str, float | None] = field(default_factory=dict)
     event_rule: str = "confirmed_candidate"
     factor_model: str = CURRENT_FACTOR_MODEL
+    exit_timestamp: datetime | None = None
+    missing_outcome_reason: str | None = None
 
     @property
     def signed_gross_return(self) -> float:
+        if self.gross_forward_return is None:
+            raise ValueError("event has no asset outcome")
         if self.direction == "LONG":
             return self.gross_forward_return
         if self.direction == "SHORT":
@@ -135,17 +140,22 @@ class ResearchMetrics:
     sharpe: float | None
     max_drawdown: float | None
     total_return: float | None
+    event_mean_stdev_ratio: float | None = None
+    timestamp_count: int = 0
+    timestamp_mean_expectancy: float | None = None
+    block_bootstrap_ci95: tuple[float, float] | None = None
+    missing_count: int = 0
 
 
 ContextAt = Callable[[str, datetime], Optional[MarketContext]]
-FundingCost = Callable[[str, datetime, datetime, str], float]
+FundingCost = Callable[[str, datetime, datetime, str], Optional[float]]
 
 
 def _completed_structure_side(row) -> str:
     """Direction accepted by the completed close used for this replay row."""
     price = row.setup.confirmation_price
-    if price is None:
-        price = row.price
+    if price is None or not row.market.is_usable:
+        return "NONE"
     if price > row.market.active_cpr.top and price > row.market.pivots.pivot:
         return "LONG"
     if price < row.market.active_cpr.bottom and price < row.market.pivots.pivot:
@@ -167,6 +177,16 @@ def config_for_factor_model(
             rs=replace(scanner_config.rs, secondary_benchmark=BROAD_ALT_FACTOR),
         )
     raise ValueError(f"unknown factor_model {factor_model}")
+
+
+def research_row_eligible(row, event_rule, factor_model=CURRENT_FACTOR_MODEL):
+    if not row.rs.is_usable or row.setup.confirmation_price is None:
+        return False
+    if event_rule in {"confirmed_candidate", "h5_discovery_structure"} and not row.market.is_usable:
+        return False
+    if factor_model == BROAD_ALT_FACTOR_MODEL:
+        return row.rs.beta is not None and row.rs.beta.secondary_benchmark == BROAD_ALT_FACTOR and row.rs.beta.secondary_beta is not None
+    return True
 
 
 def active_research_triggers(
@@ -202,6 +222,8 @@ def active_research_triggers(
 
     for event_rule in ordered_rules:
         for row in rows:
+            if not research_row_eligible(row, event_rule, factor_model):
+                continue
             if (
                 factor_model == BROAD_ALT_FACTOR_MODEL
                 and (
@@ -452,6 +474,7 @@ def _generate_point_in_time_events_for_rules(
     funding_cost: Optional[FundingCost] = None,
     event_rules: Sequence[str] = ("confirmed_candidate",),
     factor_model: str = CURRENT_FACTOR_MODEL,
+    diagnostics: Optional[dict] = None,
 ) -> list[EventOutcome]:
     """Generate completed-close rule activations without future leakage.
 
@@ -462,6 +485,8 @@ def _generate_point_in_time_events_for_rules(
     They are research events, not scanner alerts. Outcomes are attached only
     after the complete event set has been generated.
     """
+    if diagnostics is not None:
+        diagnostics.update(evaluated_rows=0, usable_rows=0, factor_available_rows=0, pending_events=0, missing_outcomes=0)
     if horizon_bars <= 0:
         raise ValueError("horizon_bars must be positive")
     if not event_rules:
@@ -487,7 +512,7 @@ def _generate_point_in_time_events_for_rules(
         event_rule: {} for event_rule in event_rules
     }
 
-    for benchmark_index in range(0, max(0, len(benchmark_bars) - horizon_bars)):
+    for benchmark_index in range(len(benchmark_bars)):
         bar = benchmark_bars[benchmark_index]
         as_of = bar.timestamp + timedelta(seconds=step)
         panel: dict[str, AssetInput] = {}
@@ -498,9 +523,10 @@ def _generate_point_in_time_events_for_rules(
             daily = _bars_closed_by(source.daily, as_of, 86_400)
             if len(daily) < 2:
                 continue
-            context = (
-                context_at(symbol, as_of) if context_at else None
-            ) or _historical_volume_context(intraday, step)
+            context = context_at(symbol, as_of) if context_at else None
+            if context is not None and (context.observed_at is None or context.observed_at > as_of):
+                raise ValueError("historical context requires observed_at no later than the event time")
+            context = context or replace(_historical_volume_context(intraday, step), observed_at=as_of)
             panel[symbol] = AssetInput(
                 symbol=symbol,
                 price=intraday[-1].close,
@@ -517,6 +543,10 @@ def _generate_point_in_time_events_for_rules(
             continue
         selected = _select_point_in_time_universe(panel, universe_size, required)
         rows = scan_assets(selected, as_of, effective_config)
+        if diagnostics is not None:
+            diagnostics["evaluated_rows"] += len(rows)
+            diagnostics["usable_rows"] += sum(r.rs.is_usable for r in rows)
+            diagnostics["factor_available_rows"] += sum(r.rs.is_usable and r.rs.beta is not None and r.rs.beta.secondary_beta is not None for r in rows)
         triggers_by_rule = active_research_triggers(
             rows, effective_config, event_rules, factor_model
         )
@@ -526,9 +556,9 @@ def _generate_point_in_time_events_for_rules(
         ))
         for event_rule in event_rules:
             triggers = triggers_by_rule[event_rule]
-            current_states = {
-                symbol: trigger.state for symbol, trigger in triggers.items()
-            }
+            eligible = {row.symbol for row in rows if research_row_eligible(row, event_rule, factor_model)}
+            current_states = {symbol: state for symbol, state in prior_states[event_rule].items() if symbol not in eligible}
+            current_states.update({symbol: trigger.state for symbol, trigger in triggers.items()})
             for symbol, trigger in triggers.items():
                 if prior_states[event_rule].get(symbol) == trigger.state:
                     continue
@@ -550,6 +580,12 @@ def _generate_point_in_time_events_for_rules(
         benchmark_entry = closes_by_symbol.get(effective_config.benchmark, {}).get(entry_open)
         benchmark_exit = closes_by_symbol.get(effective_config.benchmark, {}).get(exit_open)
         if exit_price is None or benchmark_entry is None or benchmark_exit is None:
+            events.append(EventOutcome(timestamp, symbol, direction, None, score=score,
+                entry_price=entry_price, horizon_bars=horizon_bars, features=features,
+                event_rule=event_rule, factor_model=factor_model,
+                exit_timestamp=exit_open + timedelta(seconds=step), missing_outcome_reason="missing_forward_price"))
+            if diagnostics is not None:
+                diagnostics["missing_outcomes"] += 1
             continue
         asset_forward_return = exit_price / entry_price - 1.0
         benchmark_forward_return = benchmark_exit / benchmark_entry - 1.0
@@ -626,7 +662,10 @@ def _generate_point_in_time_events_for_rules(
             btc_beta_adjusted_forward_log_return=beta_adjusted,
             model_factor_adjusted_forward_log_return=model_adjusted,
             features=features,
+            exit_timestamp=exit_timestamp,
         ))
+    if diagnostics is not None:
+        diagnostics["pending_events"] = len(pending)
     return events
 
 
@@ -662,6 +701,7 @@ def generate_point_in_time_event_suite(
     context_at: Optional[ContextAt] = None,
     funding_cost: Optional[FundingCost] = None,
     factor_model: str = CURRENT_FACTOR_MODEL,
+    diagnostics: Optional[dict] = None,
 ) -> dict[str, list[EventOutcome]]:
     """Evaluate several rules from one point-in-time scan per timestamp."""
     ordered_rules = tuple(dict.fromkeys(event_rules))
@@ -674,6 +714,7 @@ def generate_point_in_time_event_suite(
         funding_cost=funding_cost,
         event_rules=ordered_rules,
         factor_model=factor_model,
+        diagnostics=diagnostics,
     )
     return {
         event_rule: [
@@ -688,7 +729,7 @@ def net_returns(
     round_trip_cost_bps: float,
     outcome: str = "asset",
 ) -> list[float]:
-    if round_trip_cost_bps < 0:
+    if not math.isfinite(round_trip_cost_bps) or round_trip_cost_bps < 0:
         raise ValueError("round_trip_cost_bps must be non-negative")
     if outcome not in {"asset", "btc_beta_adjusted", "model_factor_adjusted"}:
         raise ValueError(
@@ -698,6 +739,8 @@ def net_returns(
     cost = round_trip_cost_bps / 10_000.0
     values = []
     for event in events:
+        if event.funding_cost is None:
+            continue
         try:
             if outcome == "asset":
                 value = event.signed_gross_return
@@ -717,44 +760,76 @@ def evaluate(
     periods_per_year: float | None = None,
     outcome: str = "asset",
 ) -> ResearchMetrics:
-    """Evaluate a pre-generated event set; it does not select a rule or threshold."""
+    """Evaluate descriptive events, not a portfolio equity series.
+
+    ``periods_per_year`` is retained for call compatibility; there is no
+    annualization without a portfolio return series at a declared frequency.
+    """
     returns = net_returns(events, round_trip_cost_bps, outcome=outcome)
     if not returns:
-        return ResearchMetrics(0, None, None, None, None, None, None, None, None)
+        return ResearchMetrics(0, None, None, None, None, None, None, None, None, missing_count=len(events))
     wins = [value for value in returns if value > 0]
     losses = [value for value in returns if value < 0]
     gross_profit = sum(wins)
     gross_loss = abs(sum(losses))
-    equity = 1.0
-    peak = 1.0
-    max_drawdown = 0.0
-    for value in returns:
-        equity *= 1.0 + value
-        peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, 1.0 - equity / peak)
-    sharpe = None
-    if len(returns) >= 2:
-        deviation = statistics.stdev(returns)
-        if deviation > 0:
-            annualizer = math.sqrt(periods_per_year) if periods_per_year else 1.0
-            sharpe = statistics.fmean(returns) / deviation * annualizer
+    deviation = statistics.stdev(returns) if len(returns) > 1 else 0.0
+    grouped = {}
+    for event in events:
+        values = net_returns([event], round_trip_cost_bps, outcome)
+        if values:
+            grouped.setdefault(event.timestamp, []).append(values[0])
+    timestamp_means = [statistics.fmean(values) for _, values in sorted(grouped.items())]
+    ci = None
+    # Resample calendar blocks at least as long as the longest holding period.
+    # Cross-asset events at a timestamp always move together. Fixed seed makes
+    # reports reproducible; the interval estimates the timestamp-weighted mean.
+    holding = max(((e.exit_timestamp - e.timestamp).total_seconds() for e in events if e.exit_timestamp), default=86400)
+    block_seconds = max(86400, holding)
+    blocks = {}
+    for timestamp, values in sorted(grouped.items()):
+        blocks.setdefault(int(timestamp.timestamp() // block_seconds), []).append(statistics.fmean(values))
+    if len(blocks) >= 5:
+        rng = random.Random(1729)
+        blocks = list(blocks.values())
+        means = []
+        for _ in range(500):
+            sample = [v for _ in blocks for v in rng.choice(blocks)]
+            means.append(statistics.fmean(sample))
+        means.sort()
+        ci = (means[12], means[487])
     return ResearchMetrics(
         count=len(returns), win_rate=len(wins) / len(returns),
         average_win=statistics.fmean(wins) if wins else None,
         average_loss=statistics.fmean(losses) if losses else None,
         expectancy=statistics.fmean(returns),
         profit_factor=(gross_profit / gross_loss if gross_loss else None),
-        sharpe=sharpe, max_drawdown=max_drawdown, total_return=equity - 1.0,
+        sharpe=None, max_drawdown=None, total_return=None,
+        event_mean_stdev_ratio=statistics.fmean(returns) / deviation if deviation else None,
+        timestamp_count=len(grouped),
+        timestamp_mean_expectancy=statistics.fmean(timestamp_means),
+        block_bootstrap_ci95=ci, missing_count=len(events) - len(returns),
     )
 
 
-def chronological_split(events: Sequence[EventOutcome], train_fraction: float = 0.65) -> tuple[list[EventOutcome], list[EventOutcome]]:
-    """One explicit chronological split; callers should also run rolling folds."""
+def chronological_split(events: Sequence[EventOutcome], train_fraction: float = 0.65,
+                        *, boundary: Optional[datetime] = None, interval_seconds: int = 3600
+                        ) -> tuple[list[EventOutcome], list[EventOutcome]]:
+    """Calendar split; purge training labels that touch the test interval."""
     if not 0.0 < train_fraction < 1.0:
         raise ValueError("train_fraction must be in (0, 1)")
-    ordered = sorted(events, key=lambda event: event.timestamp)
-    cut = max(1, min(len(ordered) - 1, int(len(ordered) * train_fraction))) if len(ordered) > 1 else len(ordered)
-    return ordered[:cut], ordered[cut:]
+    ordered = sorted(events, key=lambda event: (event.timestamp, event.symbol))
+    if not ordered:
+        return [], []
+    if boundary is None:
+        boundary = ordered[0].timestamp + (ordered[-1].timestamp - ordered[0].timestamp) * train_fraction
+    train, test = [], []
+    for event in ordered:
+        exit_time = event.exit_timestamp or event.timestamp + timedelta(seconds=(event.horizon_bars or 0) * interval_seconds)
+        if event.timestamp >= boundary:
+            test.append(event)
+        elif exit_time < boundary:
+            train.append(event)
+    return train, test
 
 
 def score_buckets(events: Sequence[EventOutcome], edges: Sequence[float]) -> dict[str, list[EventOutcome]]:

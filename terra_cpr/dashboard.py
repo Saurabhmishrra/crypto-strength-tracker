@@ -246,7 +246,7 @@ let snap = null, status = null, events = [], filter = 'ALL', sort = 'score', dir
 let reachable = true, unreachableWhy = '';
 
 /* ---------- formatting ---------- */
-const esc = v => { const d = document.createElement('div'); d.textContent = v == null ? '' : v; return d.innerHTML; };
+const esc = v => { const d = document.createElement('div'); d.textContent = v == null ? '' : v; return d.innerHTML.replaceAll('"', '&quot;').replaceAll("'", '&#39;'); };
 const n = (v, d = 2) => v == null || Number.isNaN(v) ? '&mdash;' : Number(v).toFixed(d);
 const words = s => (s || '').replace(/_/g, ' ');
 function price(v){
@@ -279,6 +279,7 @@ const scored = () => rows().filter(r =>
    band (TC = 2P - BC), so leaving the band on one side already satisfies the
    pivot leg of the rule: this single axis is the whole structure gate. */
 function bandATR(r){
+  if ((r.market.quality_flags || []).length) return null;
   const d = r.market.level_distances_atr || {};
   if (r.market.atr == null || d.TC == null || d.BC == null) return null;
   return d.TC > 0 ? d.TC : d.BC < 0 ? d.BC : 0;
@@ -287,6 +288,7 @@ function bandATR(r){
    session's travel: d.TC is (price - top)/ATR, so shifting by (price - open)/ATR
    restates it from the open's point of view. */
 function openBandATR(r){
+  if ((r.market.quality_flags || []).length) return null;
   const d = r.market.level_distances_atr || {};
   if (r.market.atr == null || r.market.session_open == null || d.TC == null || d.BC == null) return null;
   const shift = (r.market.price - r.market.session_open) / r.market.atr;
@@ -295,7 +297,7 @@ function openBandATR(r){
 }
 const passRS = r => r.rs.score != null && Math.abs(r.rs.score) >= RS_GATE;
 const passPersist = r => r.rs.persistence != null && Math.abs(r.rs.persistence) >= P_GATE;
-const passStructure = r => r.market.price_cpr_position !== 'inside_cpr';
+const passStructure = r => !(r.market.quality_flags || []).length && ['above_tc', 'below_bc'].includes(r.market.price_cpr_position);
 const weakBeta = r => (r.rs.quality_flags || []).includes('low_beta_fit');
 function tone(r){
   const l = r.setup.label;
@@ -362,6 +364,7 @@ const hideTip = () => { $('tip').dataset.show = 'false'; };
    ATR units — the only scaling under which "near R1" means the same thing on a
    $64,000 market and a $0.12 one. */
 function ladder(r, w, h){
+  if ((r.market.quality_flags || []).length) return `<p class="blocked">Daily structure unavailable: ${esc(r.market.quality_flags.join(', '))}</p>`;
   const d = r.market.level_distances_atr || {};
   if (r.market.atr == null) return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><text x="4" y="${h / 2}" fill="var(--blocked)" font-size="10">No ATR — cannot scale this ladder</text></svg>`;
   const names = ['R3', 'R2', 'R1', 'TC', 'P', 'BC', 'S1', 'S2', 'S3'];
@@ -690,7 +693,7 @@ function open(symbol){
       ${!(r.setup.reasons || []).length && !(r.setup.blockers || []).length ? '<li>No active condition.</li>' : ''}
     </ul>
     <div class="sub">Data quality</div>
-    ${(rs.quality_flags || []).length ? (rs.quality_flags).map(f => `<span class="flag">${words(f)}</span>`).join('')
+    ${[...(rs.quality_flags || []), ...(r.market.quality_flags || [])].length ? [...(rs.quality_flags || []), ...(r.market.quality_flags || [])].map(f => `<span class="flag">${words(f)}</span>`).join('')
       : '<p class="hint prose">No flags. Beta sample and bar alignment are within tolerance.</p>'}
     ${rs.reason ? `<p class="hint prose">${esc(rs.reason)}</p>` : ''}`;
   $('drawer').dataset.open = 'true';
@@ -733,7 +736,7 @@ function renderHealth(){
   $('fault').innerHTML = fault;
   $('fault').hidden = !fault;
   $('age').textContent = snap ? ago(snap.as_of) : '—';
-  $('count').textContent = snap ? rows().length : '—';
+  $('count').textContent = status && status.selected_count != null ? status.price_available_count + '/' + status.selected_count : snap ? rows().length : '—';
   const confirmed = rows().filter(r => r.setup.label.endsWith('CANDIDATE') && r.setup.confirmation === 'CONFIRMED').length;
   const provisional = rows().filter(r => r.setup.label.endsWith('CANDIDATE') && r.setup.confirmation === 'PROVISIONAL').length;
   $('cands').textContent = snap ? confirmed + ' / ' + provisional : '—';
@@ -741,6 +744,7 @@ function renderHealth(){
   $('flags').innerHTML = snap ? (f ? `<span class="warn">${f}</span>` : '0') : '—';
   const archive = status && status.research_archive;
   $('archive').textContent = archive ? archive.scans + ' bars' : '—';
+  $('archive').title = status && status.archive_age_seconds != null ? 'Archive age: ' + Math.round(status.archive_age_seconds) + 's; candle age: ' + Math.round(status.candle_age_seconds || 0) + 's' : 'No archived close';
   $('nextRefresh').textContent = status && status.next_candle_refresh ? until(status.next_candle_refresh) : '—';
   /* An old snapshot presented as current is worse than no snapshot: desaturate
      the whole surface so staleness cannot be mistaken for a quiet market. */
@@ -769,7 +773,8 @@ async function refresh(){
     }
     events = h || [];
     status = st;
-    reachable = true;
+    reachable = s !== null && st !== null;
+    if (!reachable) unreachableWhy = 'Snapshot or status is unavailable';
   } catch (err) {
     /* A rejected fetch must not leave the page painting its start-up state.
        "Cannot reach the server" and "no loop is configured" are different
@@ -870,6 +875,14 @@ class _Handler(BaseHTTPRequestHandler):
         if request.path == "/api/status":
             self._json(self._status())
             return
+        if request.path == "/livez":
+            self._json({"ok": True})
+            return
+        if request.path == "/ready":
+            status = self._status()
+            ready = bool(status.get("ready")) and bool(status.get("running")) and _read_snapshot(self.output_dir / "scanner_latest.json") is not None
+            self._json({"ready": ready, "detail": status}, HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE)
+            return
         if request.path == "/health":
             self._json({"ok": _read_snapshot(self.output_dir / "scanner_latest.json") is not None})
             return
@@ -884,7 +897,13 @@ class _Handler(BaseHTTPRequestHandler):
         if self.live_scanner is None:
             return {"loop": "off", "detail": "snapshot is whatever a scan last wrote"}
         status = asdict(self.live_scanner.status())
-        status["loop"] = "failing" if status["consecutive_failures"] else "live"
+        if not status["running"]:
+            status["loop"] = "off"
+        elif status["consecutive_failures"] or not status.get("ready", True):
+            status["loop"] = "failing"
+            status["last_error"] = status["last_error"] or "Candle or archive refresh is not ready or is stale"
+        else:
+            status["loop"] = "live"
         return status
 
     def do_POST(self) -> None:  # noqa: N802 - required handler method

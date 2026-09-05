@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -84,6 +84,7 @@ class HyperliquidPublicData:
     timeout_seconds: float = 10.0
     retries: int = 2
     endpoint: str = HYPERLIQUID_INFO_URL
+    wait: Callable[[float], None] = time.sleep
 
     def _post(self, payload: Mapping[str, Any]) -> Any:
         body = json.dumps(payload).encode("utf-8")
@@ -97,7 +98,7 @@ class HyperliquidPublicData:
                 last_error = exc
                 if attempt == self.retries:
                     break
-                time.sleep(0.4 * (2 ** attempt))
+                self.wait(0.4 * (2 ** attempt))
         raise RuntimeError(f"Hyperliquid public-data request failed: {last_error}")
 
     def fetch_candles(self, symbol: str, interval: str, start: datetime, end: datetime) -> list[Candle]:
@@ -181,12 +182,16 @@ def synthetic_demo_assets() -> tuple[datetime, int, dict[str, AssetInput]]:
         return output
 
     def daily_from_hourly(hourly: Sequence[Candle]) -> list[Candle]:
-        daily = []
-        # Days are intentionally fully completed through the session before as_of.
-        for index in range(0, len(hourly) - 24, 24):
-            group = hourly[index:index + 24]
-            daily.append(Candle(group[0].timestamp, group[0].open, max(c.high for c in group), min(c.low for c in group), group[-1].close, sum(c.volume for c in group)))
-        return daily
+        groups = {}
+        for candle in hourly:
+            day = candle.timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+            groups.setdefault(day, []).append(candle)
+        return [
+            Candle(day, group[0].open, max(c.high for c in group),
+                   min(c.low for c in group), group[-1].close, sum(c.volume for c in group))
+            for day, group in sorted(groups.items())
+            if len(group) == 24 and day + timedelta(days=1) <= as_of
+        ]
 
     btc, sol, eth = bars(btc_prices), bars(sol_prices), bars(eth_prices)
     return as_of, interval, {

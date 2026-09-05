@@ -40,7 +40,10 @@ class ResearchTests(unittest.TestCase):
         metrics = evaluate(self.events, round_trip_cost_bps=10)
         self.assertEqual(metrics.count, 4)
         self.assertAlmostEqual(metrics.expectancy or 0.0, 0.00775)
-        self.assertIsNotNone(metrics.max_drawdown)
+        self.assertIsNone(metrics.max_drawdown)
+        self.assertIsNone(metrics.total_return)
+        self.assertIsNone(metrics.sharpe)
+        self.assertIsNotNone(metrics.event_mean_stdev_ratio)
 
     def test_beta_adjusted_outcome_is_a_separate_evaluation_target(self) -> None:
         event = EventOutcome(
@@ -225,7 +228,7 @@ class ResearchTests(unittest.TestCase):
             with patch("terra_cpr.cli.load_fixture", return_value=fixture):
                 _write_backtest(args)
             report = json.loads(output.read_text())
-        self.assertEqual(report["schema_version"], 3)
+        self.assertEqual(report["schema_version"], 4)
         self.assertEqual(
             [spec["spec_id"] for spec in report["specifications"]],
             ["H1", "D1", "H5", "B1", "H6"],

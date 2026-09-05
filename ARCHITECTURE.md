@@ -1,5 +1,10 @@
 # Strength Tracker design
 
+The September reliability changes, schema migration, and replay contracts are described
+in [validation.md](docs/validation.md). Signal transitions now have a separate transactional
+SQLite checkpoint; JSON snapshots and JSONL history are derived outputs. Research archives
+preserve per-scan candle revisions and actual observation times.
+
 ## Read-only reference assessment
 
 The existing `two_day_cpr_bot` was inspected as reference material only. Its CPR formula is conventional and its public Hyperliquid data conventions are useful. Its research notes contain the more important result: raw directional Two-Day CPR, a width-gated breakout, and the CPR/EMA/pivot variant all failed their out-of-sample edge gates. CPR width did show a repeatable relationship to *next-session range*, not direction.

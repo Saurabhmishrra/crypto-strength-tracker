@@ -90,3 +90,12 @@ the refresh loop: the timer lives in the process, never in a request handler.
 
 The dashboard deliberately does not show order buttons, account data, position data, or
 buy/sell controls. Research has not earned those interfaces yet.
+
+
+The September reliability update exposes `/livez` (HTTP liveness) and `/ready`
+(scanner readiness; 503 until a current candle/archive commit and snapshot exist).
+`/api/status` includes selected, admitted, price-available, and score-usable counts,
+separate candle and mid failure counters, and candle/archive ages. Missing prices
+are named in the health rail and cannot clear a confirmed history state. Daily-data
+quality flags also appear in the asset drawer. A snapshot HTTP 503 marks the page
+unreachable even when its HTML server is alive.

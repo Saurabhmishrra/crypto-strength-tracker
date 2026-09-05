@@ -1,3 +1,9 @@
+Implementation update (5 September 2026): research reports now use common calendar
+boundaries, purge crossing labels, include rolling folds, and withhold the final holdout
+unless explicitly released. Archived context retains its actual observation time;
+replay uses recorded membership and candle revisions. See [validation.md](docs/validation.md)
+for the precise contracts. Historical study results below have not been rerun by this update.
+
 # Research protocol and hypotheses
 
 ## Non-negotiable rules

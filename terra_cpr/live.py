@@ -11,7 +11,7 @@ import math
 import statistics
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -26,7 +26,8 @@ from .research import (
 )
 from .research_archive import ResearchArchive
 from .scanner import AssetInput, ScannerConfig, scan_assets
-from .signal_history import append_history, signal_transitions
+from .signal_history import SignalStore
+from .validation import finite_number, positive_int
 
 DAY_SECONDS = 86_400
 MAX_PUBLIC_CANDLES = 5_000
@@ -154,18 +155,31 @@ class CandleCache:
             raise ValueError("cache window must be positive")
         self.window = window
         self._bars: dict[str, dict[datetime, Candle]] = {}
+        self._verified: dict[str, set[datetime]] = {}
 
-    def merge(self, symbol: str, candles: Sequence[Candle]) -> None:
+    def merge(self, symbol: str, candles: Sequence[Candle], *, observed_at: Optional[datetime] = None, interval_seconds: Optional[int] = None) -> None:
         stored = self._bars.setdefault(symbol, {})
+        verified = self._verified.setdefault(symbol, set())
+        if (observed_at is None) != (interval_seconds is None):
+            raise ValueError("observed_at and interval_seconds must be supplied together")
         for candle in candles:
+            final = observed_at is None or candle.timestamp + timedelta(seconds=interval_seconds) <= observed_at
+            if candle.timestamp in verified and not final:
+                continue
             stored[candle.timestamp] = candle
+            if final:
+                verified.add(candle.timestamp)
         if len(stored) > self.window:
             for timestamp in sorted(stored)[: len(stored) - self.window]:
                 del stored[timestamp]
+                verified.discard(timestamp)
 
     def get(self, symbol: str) -> list[Candle]:
         stored = self._bars.get(symbol)
         return [stored[timestamp] for timestamp in sorted(stored)] if stored else []
+
+    def completed(self, symbol: str, interval_seconds: int, as_of: datetime) -> list[Candle]:
+        return completed_bars([c for c in self.get(symbol) if c.timestamp in self._verified.get(symbol, set())], interval_seconds, as_of)
 
     def last_timestamp(self, symbol: str) -> Optional[datetime]:
         stored = self._bars.get(symbol)
@@ -291,6 +305,9 @@ def build_panel(
     interval_seconds: int,
     benchmark: str = "BTC",
     contexts: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    context_observed_at: Optional[datetime] = None,
+    price_observed_at: Optional[datetime] = None,
+    candle_observed_at: Optional[Mapping[str, datetime]] = None,
 ) -> dict[str, AssetInput]:
     """Assemble the scanner panel from cached bars and current mid prices.
 
@@ -305,17 +322,19 @@ def build_panel(
         price = mids.get(symbol)
         if price is None:
             continue
-        daily_bars = list(daily.get(symbol, ()))
-        closed_daily = completed_bars(daily_bars, DAY_SECONDS, as_of)
+        daily_bars = daily.get(symbol) if isinstance(daily, CandleCache) else list(daily.get(symbol, ()))
+        closed_daily = daily.completed(symbol, DAY_SECONDS, as_of) if isinstance(daily, CandleCache) else completed_bars(daily_bars, DAY_SECONDS, as_of)
         panel[symbol] = AssetInput(
             symbol=symbol,
             price=float(price),
             daily=closed_daily,
-            intraday=completed_bars(hourly.get(symbol), interval_seconds, as_of),
+            intraday=hourly.completed(symbol, interval_seconds, as_of),
             session_open=_session_open(daily_bars, as_of),
             prior_price=prior_prices.get(symbol),
+            price_observed_at=price_observed_at,
+            candles_observed_at=(candle_observed_at or {}).get(symbol),
             context=(
-                build_market_context(contexts[symbol], closed_daily)
+                replace(build_market_context(contexts[symbol], closed_daily), observed_at=context_observed_at)
                 if symbol in contexts else None
             ),
         )
@@ -333,6 +352,13 @@ class LiveConfig:
     daily_window: int = 140
     min_gap_seconds: float = 0.12
 
+    def __post_init__(self):
+        for name in ("universe_size", "hourly_window", "daily_window"):
+            positive_int(name, getattr(self, name))
+        finite_number("fast_interval_seconds", self.fast_interval_seconds, inclusive=False)
+        for name in ("settle_seconds", "min_gap_seconds"):
+            finite_number(name, getattr(self, name))
+
 
 @dataclass(frozen=True)
 class LiveStatus:
@@ -349,6 +375,15 @@ class LiveStatus:
     #: to why. Never empty silently: a shrunken panel has to be visible.
     excluded_symbols: Mapping[str, str] = field(default_factory=dict)
     research_archive: Mapping[str, Any] = field(default_factory=dict)
+    selected_count: int = 0
+    admitted_count: int = 0
+    price_available_count: int = 0
+    score_usable_count: int = 0
+    candle_failures: int = 0
+    mid_failures: int = 0
+    candle_age_seconds: Optional[float] = None
+    archive_age_seconds: Optional[float] = None
+    ready: bool = False
 
 
 class LiveScanner:
@@ -370,8 +405,22 @@ class LiveScanner:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         research_archive: Optional[ResearchArchive] = None,
+        now: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self.output_dir = Path(output_dir)
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._stop = threading.Event()
+        self._pending_commit = None
+        self._pending_refresh = False
+        self._refresh_failures = 0
+        self._mid_failures = 0
+        self._selected_count = 0
+        self._selected_symbols = []
+        self._price_count = 0
+        self._usable_count = 0
+        self._context_observed_at = None
+        self._candle_observed_at = {}
+        self.signal_store = SignalStore(self.output_dir)
         self.source = source
         self.scanner_config = scanner_config
         self.live_config = live_config
@@ -409,7 +458,7 @@ class LiveScanner:
         )
         self.fetcher = ThrottledCandleFetcher(
             source=source, min_gap_seconds=live_config.min_gap_seconds,
-            sleep=sleep, monotonic=monotonic,
+            sleep=self._interruptible_wait if sleep is time.sleep else sleep, monotonic=monotonic,
         )
         self.hourly = CandleCache(window=self._intraday_window)
         self.daily = CandleCache(window=self._daily_window)
@@ -417,7 +466,6 @@ class LiveScanner:
         self._market_contexts: dict[str, Mapping[str, Any]] = {}
         self.symbols: list[str] = []
         self._lock = threading.Lock()
-        self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_tick: Optional[datetime] = None
         self._last_candle_refresh: Optional[datetime] = None
@@ -426,11 +474,16 @@ class LiveScanner:
         self._error: Optional[str] = None
         self._excluded: dict[str, str] = {}
 
+    def _interruptible_wait(self, seconds):
+        if self._stop.wait(seconds):
+            raise InterruptedError("scanner is stopping")
+
     # -- data acquisition -------------------------------------------------
 
     def _refresh_universe(self) -> list[str]:
         """Select the candidate universe. Candidates are not yet scannable."""
         meta, contexts = self.source.fetch_meta_and_contexts()
+        self._context_observed_at = self._now()
         secondary = self.scanner_config.rs.secondary_benchmark
         entries = meta.get("universe", [])
         secondary_available = any(
@@ -455,6 +508,8 @@ class LiveScanner:
             for entry, context in zip(entries, contexts)
             if isinstance(entry, Mapping) and entry.get("name") in selected
         }
+        self._selected_count = len(selected)
+        self._selected_symbols = selected
         return selected
 
     def _refresh_candles(self, candidates: Sequence[str], as_of: datetime) -> list[str]:
@@ -478,6 +533,8 @@ class LiveScanner:
         admitted: list[str] = []
         excluded: dict[str, str] = {}
         for symbol in candidates:
+            if self._stop.is_set():
+                raise InterruptedError("scanner is stopping")
             failure: Optional[str] = None
             try:
                 for cache, label, step, depth in (
@@ -491,10 +548,12 @@ class LiveScanner:
                         # Re-request the stored tail so a bar captured mid-formation
                         # is replaced by its settled version.
                         start = last - timedelta(seconds=step * 2)
-                    cache.merge(symbol, self.fetcher.fetch(symbol, label, start, as_of))
+                    fetched = self.fetcher.fetch(symbol, label, start, as_of)
+                    cache.merge(symbol, fetched, observed_at=as_of, interval_seconds=step)
+                    self._candle_observed_at[symbol] = self._now()
             except Exception as exc:  # noqa: BLE001 - one symbol must not cost the panel
                 failure = f"{type(exc).__name__}: {exc}"
-            if len(completed_bars(self.daily.get(symbol), DAY_SECONDS, as_of)) >= MIN_DAILY_BARS:
+            if len(self.daily.completed(symbol, DAY_SECONDS, as_of)) >= MIN_DAILY_BARS:
                 admitted.append(symbol)
             else:
                 excluded[symbol] = failure or (
@@ -512,77 +571,82 @@ class LiveScanner:
 
     # -- the tick ---------------------------------------------------------
 
-    def tick(self, as_of: datetime, refresh_candles: bool) -> None:
-        """Run one scan. A failure is recorded, never written as a partial panel."""
-        did_refresh_candles = refresh_candles or not self.symbols
+    def _commit_refresh(self):
+        panel, factor_rows, snapshot = self._pending_commit
+        self.research_archive.record(panel, factor_rows, self.scanner_config,
+                                     observed_at=datetime.fromisoformat(snapshot.get("observed_at", snapshot["as_of"])),
+                                     selection={"selected": self._selected_symbols, "excluded": self._excluded})
+        self._publish(snapshot, completed_refresh=True)
+        self._pending_commit = None
+
+    def tick(self, as_of: datetime, refresh_candles: bool) -> bool:
+        """Return success; a failed close stays pending until its durable commit."""
+        did_refresh = refresh_candles or self._pending_refresh or not self.symbols
         try:
-            if did_refresh_candles:
-                # Only the admitted subset is ever published as scannable.
+            if self._pending_commit is not None:
+                self._commit_refresh()
+            if did_refresh:
+                self._pending_refresh = True
                 self.symbols = self._refresh_candles(self._refresh_universe(), as_of)
-            mids = {
-                symbol: float(price)
-                for symbol, price in self.source.fetch_mids().items()
-                if symbol in set(self.symbols)
-            }
+            mids = {symbol: float(price) for symbol, price in self.source.fetch_mids().items() if symbol in self.symbols}
+            observed_at = max(as_of, self._now())
+            self._price_count = len(mids)
+            # Candle admission faults and transient missing prices are distinct.
+            with self._lock:
+                self._excluded = {s: reason for s, reason in self._excluded.items() if s not in self.symbols}
+                self._excluded.update({s: "current mid unavailable" for s in self.symbols if s not in mids})
             panel = build_panel(
-                symbols=self.symbols, hourly=self.hourly,
-                daily={symbol: self.daily.get(symbol) for symbol in self.symbols},
+                symbols=self.symbols, hourly=self.hourly, daily=self.daily,
                 mids=mids, prior_prices=self.prior_prices, as_of=as_of,
                 interval_seconds=self.scanner_config.interval_seconds,
-                benchmark=self.scanner_config.benchmark,
-                contexts=self._market_contexts,
+                benchmark=self.scanner_config.benchmark, contexts=self._market_contexts,
+                context_observed_at=self._context_observed_at,
+                price_observed_at=observed_at, candle_observed_at=self._candle_observed_at,
             )
             rows = scan_assets(panel, as_of, self.scanner_config)
-            if did_refresh_candles:
-                current_factor_config = config_for_factor_model(
-                    self.scanner_config, CURRENT_FACTOR_MODEL
-                )
-                current_factor_rows = (
-                    rows
-                    if current_factor_config == self.scanner_config
-                    else scan_assets(panel, as_of, current_factor_config)
-                )
-                broad_config = config_for_factor_model(
-                    self.scanner_config, BROAD_ALT_FACTOR_MODEL
-                )
-                broad_rows = scan_assets(panel, as_of, broad_config)
-                self.research_archive.record(
-                    panel,
-                    {
-                        CURRENT_FACTOR_MODEL: current_factor_rows,
-                        BROAD_ALT_FACTOR_MODEL: broad_rows,
-                    },
-                    self.scanner_config,
-                )
+            self._usable_count = sum(row.rs.is_usable for row in rows)
             snapshot = scan_snapshot(as_of, rows, self.scanner_config)
-            self._publish(snapshot)
+            snapshot["observed_at"] = observed_at.isoformat()
+            if did_refresh:
+                current_config = config_for_factor_model(self.scanner_config, CURRENT_FACTOR_MODEL)
+                current_rows = rows if current_config == self.scanner_config else scan_assets(panel, as_of, current_config)
+                broad_rows = scan_assets(panel, as_of, config_for_factor_model(self.scanner_config, BROAD_ALT_FACTOR_MODEL))
+                self._pending_commit = (panel, {CURRENT_FACTOR_MODEL: current_rows, BROAD_ALT_FACTOR_MODEL: broad_rows}, snapshot)
+                self._commit_refresh()
+            else:
+                self._publish(snapshot, completed_refresh=False)
             self.prior_prices = {symbol: asset.price for symbol, asset in panel.items()}
-        except Exception as exc:  # noqa: BLE001 - a loop must survive any feed fault
+        except Exception as exc:
             with self._lock:
                 self._failures += 1
+                if did_refresh:
+                    self._refresh_failures += 1
+                else:
+                    self._mid_failures += 1
                 self._error = f"{type(exc).__name__}: {exc}"
-            return
+            return False
         with self._lock:
             self._failures = 0
+            self._mid_failures = 0
             self._error = None
             self._last_tick = as_of
-            if did_refresh_candles:
+            if did_refresh:
+                self._refresh_failures = 0
+                self._pending_refresh = False
                 self._last_candle_refresh = as_of
+        return True
 
-    def _publish(self, snapshot: Mapping[str, Any]) -> None:
-        snapshot_path = self.output_dir / "scanner_latest.json"
-        history_path = self.output_dir / "signal_history.jsonl"
-        try:
-            previous = json.loads(snapshot_path.read_text()) if snapshot_path.exists() else None
-        except (OSError, json.JSONDecodeError):
-            previous = None
-        events = signal_transitions(previous, snapshot)
-        write_json_atomic(snapshot_path, snapshot)
-        append_history(history_path, events)
+    def _publish(self, snapshot: Mapping[str, Any], completed_refresh=True) -> None:
+        self.signal_store.record(snapshot, completed_refresh)
+        self.signal_store.export()
+        write_json_atomic(self.output_dir / "scanner_latest.json", snapshot)
 
     def status(self) -> LiveStatus:
         archive = asdict(self.research_archive.status())
         archive["path"] = Path(archive["path"]).name
+        now = self._now()
+        candle_age = (now - self._last_candle_refresh).total_seconds() if self._last_candle_refresh else None
+        archive_age = (now - datetime.fromisoformat(archive["last_completed_bar"])).total_seconds() if archive["last_completed_bar"] else None
         with self._lock:
             return LiveStatus(
                 running=self._thread is not None and self._thread.is_alive(),
@@ -598,6 +662,13 @@ class LiveScanner:
                 last_error=self._error,
                 excluded_symbols=dict(self._excluded),
                 research_archive=archive,
+                selected_count=self._selected_count, admitted_count=len(self.symbols),
+                price_available_count=self._price_count, score_usable_count=self._usable_count,
+                candle_failures=self._refresh_failures, mid_failures=self._mid_failures,
+                candle_age_seconds=candle_age, archive_age_seconds=archive_age,
+                ready=(not self._failures and not self._pending_refresh and candle_age is not None
+                       and candle_age <= self.scanner_config.interval_seconds + self.live_config.settle_seconds + 60
+                       and archive_age is not None and archive_age <= self.scanner_config.interval_seconds + self.live_config.settle_seconds + 60),
             )
 
     # -- threading --------------------------------------------------------
@@ -615,16 +686,19 @@ class LiveScanner:
         while not self._stop.is_set():
             now = datetime.now(timezone.utc)
             due = self._next_candle_refresh is None or now >= self._next_candle_refresh
-            self.tick(now, refresh_candles=due)
-            if due:
+            success = self.tick(now, refresh_candles=due)
+            if due and success:
                 with self._lock:
                     self._next_candle_refresh = self._next_boundary(now)
-            self._stop.wait(self.live_config.fast_interval_seconds)
+            delay = min(60.0, 5.0 * 2 ** min(self._refresh_failures, 4)) if self._pending_refresh else self.live_config.fast_interval_seconds
+            self._stop.wait(delay)
 
     def start(self) -> threading.Thread:
         if self._thread is not None and self._thread.is_alive():
             return self._thread
         self._stop.clear()
+        if hasattr(self.source, "wait"):
+            self.source.wait = self._interruptible_wait
         self._thread = threading.Thread(target=self._run, name="terra-live", daemon=True)
         self._thread.start()
         return self._thread

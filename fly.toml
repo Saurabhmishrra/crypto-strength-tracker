@@ -23,7 +23,7 @@ primary_region = "iad"
     soft_limit = 100
     hard_limit = 200
 
-# /health answers 200 whenever the HTTP surface is alive. Whether the loop is
+# /livez answers 200 whenever the HTTP surface is alive. Whether the loop is
 # healthy is a different question, answered by /api/status and drawn on the
 # page's own health rail.
 [[http_service.checks]]
@@ -31,7 +31,7 @@ primary_region = "iad"
   timeout = "5s"
   grace_period = "90s"
   method = "GET"
-  path = "/health"
+  path = "/livez"
 
 [[mounts]]
   source = "scanner_data"

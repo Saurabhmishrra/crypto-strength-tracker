@@ -33,6 +33,21 @@ The immediate objective is to answer a narrower question honestly: *do persisten
 - A durable SQLite research archive written only at completed-bar refreshes. It stores deduplicated intraday/daily candles, point-in-time panel membership and context, per-model availability, and observations plus transitions for H1, D1, H5, B1, and H6.
 - Research-only collection of impact spread, a candle-derived relative-notional proxy, funding, open interest, and market breadth. None enters the score until it improves untouched out-of-sample results.
 
+## Validation and reliability update
+
+Completed candles must now have been fetched after their close before they can enter
+scores or research. Failed research commits stay pending; a working mid-price endpoint
+cannot clear that failure. Missing prices and unavailable rows preserve the last known
+confirmed state, with availability reported separately. Daily CPR requires current,
+continuous UTC session data.
+
+Signal states and events are committed together in `signal_history.sqlite3`.
+`signal_history.jsonl` is a compatibility export, and the dashboard reads recent events
+through an indexed query. Keep both SQLite databases on the persistent volume.
+
+See [`docs/validation.md`](docs/validation.md) for migration, replay, funding data,
+calendar folds, readiness endpoints, browser tests, and performance measurements.
+
 ## Quick start
 
 ```bash
@@ -62,10 +77,12 @@ The suite reports H1, persistence-free discovery, discovery plus completed struc
 a simple 24h residual-momentum baseline, and the structure rule rebuilt with BTC plus a
 leave-one-out broad-alt factor. None changes the live candidate or alert rules.
 
-The report includes signed asset return (the feasibility/P&L view), event-time
+The report includes signed asset event returns, event-time
 BTC-beta-adjusted forward log return, and the selected full-model residual return. It
-does not prove an edge by itself; rolling folds and a final untouched holdout remain
-required.
+does not prove an edge by itself. Shared calendar splits, purged outcome windows,
+and rolling folds are included. The final 20% holdout is withheld unless
+`--include-holdout` explicitly releases it. Event metrics do not include portfolio
+return, drawdown, or Sharpe.
 
 ## Live scanning and the local cockpit
 
@@ -120,7 +137,7 @@ falls back to `unreachable` once `/api/snapshot` starts answering 503.
 
 Nothing in the loop can retry its way out of this; the write is genuinely denied. Keeping
 the launching terminal open also works, but the path above survives however it is started.
-`--output` only moves the snapshot, signal history, and SQLite research archive. All are
+`--output` selects the directory for the snapshot, signal store/export, and SQLite research archive. All are
 gitignored; no source or committed file moves with them.
 
 The loop is public-data only: it selects a universe from `metaAndAssetCtxs` and reads
@@ -161,8 +178,8 @@ process, so a machine stopped for lack of HTTP traffic is a scanner that has
 stopped scanning, and the page goes on serving an increasingly stale snapshot.
 `auto_stop_machines = false` and `min_machines_running = 1` are load-bearing.
 
-**Mount a volume at `/data`.** The snapshot is disposable; `signal_history.jsonl`
-and `research_archive.sqlite3` are not. The SQLite archive stores completed candle
+**Mount a volume at `/data`.** The snapshot is disposable; `signal_history.sqlite3`
+and `research_archive.sqlite3` are not. The JSONL history is a derived export. The SQLite archive stores completed candle
 history, actual panel membership and context at each close, every active five-model
 observation, and non-spamming state transitions. Without a volume, both histories
 restart empty on every release.

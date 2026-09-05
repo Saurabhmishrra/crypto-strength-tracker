@@ -4,10 +4,11 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Sequence
 
 from .models import CPRLevels, Candle, MarketStructure, PivotLevels
+from .validation import positive_int
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,12 @@ class MarketStructureConfig:
     realized_vol_period: int = 20
     width_history: int = 120
     minimum_width_history: int = 20
+
+    def __post_init__(self):
+        for name, value in vars(self).items():
+            positive_int(name, value)
+        if self.minimum_width_history > self.width_history:
+            raise ValueError("minimum_width_history must not exceed width_history")
 
 
 def calculate_cpr(high: float, low: float, close: float) -> CPRLevels:
@@ -142,7 +149,21 @@ def build_market_structure(
         not math.isfinite(session_open) or session_open <= 0
     ):
         raise ValueError("session_open must be positive")
+    if len(closed_daily) < 2:
+        return MarketStructure(
+            symbol, as_of, price, session_open, None, None, None,
+            None, "unknown", None, None, "unavailable", None, "unavailable", {},
+            ("insufficient_daily_history",),
+        )
     daily = _validate_daily(closed_daily)
+    flags = []
+    expected = as_of.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    if daily[-1].timestamp != expected:
+        flags.append("stale_daily_structure")
+    if any(c.timestamp != c.timestamp.replace(hour=0, minute=0, second=0, microsecond=0) for c in daily):
+        flags.append("invalid_daily_session")
+    if any(b.timestamp - a.timestamp != timedelta(days=1) for a, b in zip(daily, daily[1:])):
+        flags.append("daily_history_gap")
     prior, active = daily[-2], daily[-1]
     active_cpr = calculate_cpr(active.high, active.low, active.close)
     previous_cpr = calculate_cpr(prior.high, prior.low, prior.close)
@@ -181,4 +202,5 @@ def build_market_structure(
         opening_cpr_position=cpr_position(session_open, active_cpr) if session_open is not None else None,
         pivot_position=pivot_position(price, pivots),
         level_distances_atr=distances,
+        quality_flags=tuple(flags),
     )

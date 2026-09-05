@@ -83,9 +83,9 @@ class MarketStructure:
     as_of: datetime
     price: float
     session_open: Optional[float]
-    active_cpr: CPRLevels
-    previous_cpr: CPRLevels
-    pivots: PivotLevels
+    active_cpr: Optional[CPRLevels]
+    previous_cpr: Optional[CPRLevels]
+    pivots: Optional[PivotLevels]
     cpr_width_percentile: Optional[float]
     cpr_regime: str
     atr: Optional[float]
@@ -94,6 +94,11 @@ class MarketStructure:
     opening_cpr_position: Optional[str]
     pivot_position: str
     level_distances_atr: Mapping[str, Optional[float]]
+    quality_flags: tuple[str, ...] = ()
+
+    @property
+    def is_usable(self) -> bool:
+        return self.active_cpr is not None and not self.quality_flags
 
 
 @dataclass(frozen=True)
@@ -165,6 +170,7 @@ class MarketContext:
     premium: Optional[float] = None
     mark_price: Optional[float] = None
     context_mid_price: Optional[float] = None
+    observed_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -177,3 +183,4 @@ class ScanRow:
     strong_rank: Optional[int] = None
     weak_rank: Optional[int] = None
     context: Optional[MarketContext] = None
+    input_cutoff: Optional[datetime] = None

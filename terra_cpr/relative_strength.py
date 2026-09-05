@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Mapping, Optional, Sequence
 
 from .models import BetaEstimate, Candle, RelativeStrength
+from .validation import positive_int, finite_number
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class RSConfig:
     @classmethod
     def for_interval(cls, interval_seconds: int) -> "RSConfig":
         """Keep the economic horizons fixed when the candle interval changes."""
+        positive_int("interval_seconds", interval_seconds)
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
 
@@ -61,6 +63,12 @@ class RSConfig:
             "min_empirical_windows": self.min_empirical_windows,
             "broad_alt_min_constituents": self.broad_alt_min_constituents,
         }
+        for name, value in windows.items():
+            positive_int(name, value)
+        finite_number("min_alignment_ratio", self.min_alignment_ratio, inclusive=False)
+        finite_number("winsor_mad", self.winsor_mad, inclusive=False)
+        if self.secondary_benchmark is not None and (not isinstance(self.secondary_benchmark, str) or not self.secondary_benchmark.strip()):
+            raise ValueError("secondary_benchmark must be a nonempty symbol or None")
         non_positive = [name for name, value in windows.items() if value <= 0]
         if non_positive:
             raise ValueError(f"RS windows must be positive: {', '.join(non_positive)}")
@@ -504,7 +512,7 @@ def compute_relative_strength(
         base_flags.append("stale_or_misaligned")
     if timestamps and (
         as_of - (timestamps[-1] + timedelta(seconds=interval_seconds))
-        > timedelta(seconds=interval_seconds)
+        >= timedelta(seconds=interval_seconds)
     ):
         base_flags.append("stale_or_misaligned")
     if len(asset_close) < required_bars:
@@ -520,6 +528,8 @@ def compute_relative_strength(
     btc_returns = _log_returns(btc_close)
     secondary_factor_returns: Optional[list[float]] = None
     secondary_primary_beta: Optional[float] = None
+    if secondary_benchmark and not secondary_bars:
+        base_flags.append("secondary_factor_unavailable")
     if secondary_benchmark and secondary_bars:
         secondary_by_time = {candle.timestamp: candle.close for candle in secondary_bars}
         if all(timestamp in secondary_by_time for timestamp in timestamps):
@@ -562,6 +572,9 @@ def compute_relative_strength(
             horizon_z={}, persistence=None, acceleration=None, alignment_ratio=alignment_ratio,
             quality_flags=tuple(base_flags), reason="unable to estimate beta from valid benchmark returns",
         )
+
+    if secondary_benchmark and beta.secondary_beta is None and "secondary_factor_unavailable" not in base_flags:
+        base_flags.append("secondary_factor_unavailable")
 
     residuals = []
     for index, (asset_return, btc_return) in enumerate(zip(asset_returns, btc_returns)):

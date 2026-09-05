@@ -116,7 +116,7 @@ class ResearchArchiveTests(unittest.TestCase):
         self.assertEqual(status.observations, 14)
         self.assertEqual(status.events, 7)
 
-    def test_a_later_empty_state_creates_clearing_events(self) -> None:
+    def test_unavailable_rows_preserve_states_without_false_clearings(self) -> None:
         archive = ResearchArchive(self.path)
         archive.record(self.panel, self.rows, self.config)
         status = archive.record(
@@ -124,12 +124,12 @@ class ResearchArchiveTests(unittest.TestCase):
             {CURRENT_FACTOR_MODEL: (), BROAD_ALT_FACTOR_MODEL: ()},
             self.config,
         )
-        self.assertEqual(status.active_states, 0)
+        self.assertEqual(status.active_states, 7)
         with sqlite3.connect(self.path) as connection:
             cleared = connection.execute(
                 "SELECT COUNT(*) FROM research_events WHERE event_type = 'cleared'"
             ).fetchone()[0]
-        self.assertEqual(cleared, 7)
+        self.assertEqual(cleared, 0)
 
     def test_out_of_order_completed_panels_are_rejected(self) -> None:
         archive = ResearchArchive(self.path)

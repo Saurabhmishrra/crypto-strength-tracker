@@ -31,10 +31,14 @@ def scan_snapshot(
         payload = asdict(row)
         for key in ("active_cpr", "previous_cpr"):
             cpr = payload["market"][key]
+            if cpr is None:
+                continue
             cpr["bottom"] = min(cpr["bc"], cpr["tc"])
             cpr["top"] = max(cpr["bc"], cpr["tc"])
             cpr["width"] = cpr["top"] - cpr["bottom"]
         payload_rows.append(payload)
+        payload["data_available"] = row.rs.is_usable and row.market.is_usable
+        payload["input_cutoff"] = getattr(row, "input_cutoff", None)
     usable_scores = [float(row.rs.score) for row in rows if row.rs.is_usable]
     discovery_scores = [
         float(row.rs.discovery_score) for row in rows
@@ -78,7 +82,7 @@ def scan_snapshot(
     # WATCH without recording the rule that made it WATCH cannot be audited later,
     # and a reader has no way to draw the gate it missed.
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "as_of": as_of.isoformat(),
         "gates": {
             "candidate_rs_score": config.candidate_rs_score,

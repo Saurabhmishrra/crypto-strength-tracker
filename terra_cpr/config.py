@@ -41,13 +41,23 @@ def _read_toml(text: str) -> dict[str, dict[str, Any]]:
     output: dict[str, dict[str, Any]] = {}
     section: dict[str, Any] | None = None
     for line_number, original in enumerate(text.splitlines(), start=1):
-        line = original.split("#", 1)[0].strip()
+        quote = None
+        end = len(original)
+        for index, char in enumerate(original):
+            if char in {"'", '"'} and (index == 0 or original[index - 1] != "\\"):
+                quote = None if quote == char else char if quote is None else quote
+            if char == "#" and quote is None:
+                end = index
+                break
+        line = original[:end].strip()
         if not line:
             continue
         if line.startswith("[") and line.endswith("]"):
             name = line[1:-1].strip()
             if not name or "." in name:
                 raise ValueError(f"unsupported TOML section on line {line_number}")
+            if name in output:
+                raise ValueError(f"duplicate TOML section {name}")
             section = output.setdefault(name, {})
             continue
         if section is None or "=" not in line:
@@ -55,6 +65,8 @@ def _read_toml(text: str) -> dict[str, dict[str, Any]]:
         key, value = (part.strip() for part in line.split("=", 1))
         if not key:
             raise ValueError(f"empty TOML key on line {line_number}")
+        if key in section:
+            raise ValueError(f"duplicate TOML key {key}")
         section[key] = _parse_scalar(value)
     return output
 
@@ -68,20 +80,20 @@ def _known_values(raw: Mapping[str, Any], cls) -> dict[str, Any]:
 
 
 def load_scanner_config(path: Path, fallback_interval_seconds: int) -> ScannerConfig:
-    raw = _read_toml(path.read_text())
+    raw = read_config(path)
     scanner_values = dict(raw.get("scanner", {}))
     scanner_values.setdefault("interval_seconds", fallback_interval_seconds)
     market_values = _known_values(raw.get("market_structure", {}), MarketStructureConfig)
     rs_values = _known_values(raw.get("relative_strength", {}), RSConfig)
     decision_values = _known_values(raw.get("decision", {}), ScannerConfig)
-    decision_values.pop("market", None)
-    decision_values.pop("rs", None)
+    if set(decision_values) & {"market", "rs"}:
+        raise ValueError("market and rs settings must use their own configuration sections")
     scanner_values.update(decision_values)
     allowed_scanner = {field.name for field in fields(ScannerConfig)} - {"market", "rs"}
     unknown_scanner = sorted(set(scanner_values).difference(allowed_scanner))
     if unknown_scanner:
         raise ValueError(f"unknown ScannerConfig setting(s): {', '.join(unknown_scanner)}")
-    rs_config = replace(RSConfig.for_interval(int(scanner_values["interval_seconds"])), **rs_values)
+    rs_config = replace(RSConfig.for_interval(scanner_values["interval_seconds"]), **rs_values)
     config = ScannerConfig(
         **scanner_values,
         market=MarketStructureConfig(**market_values),
@@ -100,7 +112,19 @@ def load_live_configs(path: Path) -> tuple[ScannerConfig, LiveConfig]:
     A live run has no fixture to agree with, so the bar interval is taken from
     the configuration rather than cross-checked against one.
     """
-    raw = _read_toml(path.read_text())
-    interval = int(raw.get("scanner", {}).get("interval_seconds", DEFAULT_INTERVAL_SECONDS))
+    raw = read_config(path)
+    interval = raw.get("scanner", {}).get("interval_seconds", DEFAULT_INTERVAL_SECONDS)
     live_values = _known_values(raw.get("live", {}), LiveConfig)
     return load_scanner_config(path, interval), LiveConfig(**live_values)
+
+
+def read_config(path: Path) -> dict:
+    raw = _read_toml(path.read_text())
+    allowed = {"scanner", "market_structure", "relative_strength", "decision", "live"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"unknown configuration section(s): {', '.join(sorted(unknown))}")
+    if any(not isinstance(value, dict) for value in raw.values()):
+        raise ValueError("configuration values must be inside supported sections")
+    LiveConfig(**_known_values(raw.get("live", {}), LiveConfig))
+    return raw

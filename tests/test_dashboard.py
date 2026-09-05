@@ -32,6 +32,7 @@ class _FakeScanner:
             running=True, universe_size=42, last_tick="2026-08-07T05:00:00+00:00",
             last_candle_refresh=None, next_candle_refresh=None,
             consecutive_failures=failures, last_error=error,
+            ready=not failures,
         )
 
     def status(self):
@@ -130,6 +131,11 @@ class StatusWithHealthyLoop(_ServerCase):
         self.assertEqual(payload["loop"], "live")
         self.assertEqual(payload["universe_size"], 42)
 
+    def test_ready_requires_a_published_snapshot(self):
+        self.assertEqual(self.status_of("/ready"), 503)
+        self._write_snapshot()
+        self.assertEqual(self.status_of("/ready"), 200)
+
 
 class StatusWithFailingLoop(_ServerCase):
     live_scanner = _FakeScanner(failures=3, error="RuntimeError: endpoint down")
@@ -139,6 +145,11 @@ class StatusWithFailingLoop(_ServerCase):
         self.assertEqual(payload["loop"], "failing")
         self.assertEqual(payload["consecutive_failures"], 3)
         self.assertIn("endpoint down", payload["last_error"])
+
+    def test_liveness_survives_failure_but_readiness_does_not(self):
+        self._write_snapshot()
+        self.assertEqual(self.status_of("/livez"), 200)
+        self.assertEqual(self.status_of("/ready"), 503)
 
 
 class PublicExposureHardening(_ServerCase):

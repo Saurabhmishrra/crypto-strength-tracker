@@ -6,6 +6,7 @@ import math
 import os
 import time
 from dataclasses import asdict, replace
+from datetime import timedelta
 from pathlib import Path
 
 from .config import load_live_configs, load_scanner_config
@@ -18,12 +19,12 @@ from .research import (
     CURRENT_FACTOR_MODEL,
     FIVE_MODEL_COMPARISON,
     ResearchSpecification,
-    chronological_split,
-    evaluate,
     generate_point_in_time_event_suite,
 )
 from .scanner import ScannerConfig, scan_assets
-from .signal_history import append_history, signal_transitions
+from .signal_history import SignalStore
+from .research_reporting import calendar_plan, summarize_events, load_funding_series
+from .provenance import source_identity
 from .dashboard import serve
 
 
@@ -37,19 +38,11 @@ def _write_scan(output: Path, as_of, assets, interval_seconds: int, config_path:
     )
     rows = scan_assets(assets, as_of, config)
     snapshot = scan_snapshot(as_of, rows, config)
-    previous_path = output / "scanner_latest.json"
-    history_path = output / "signal_history.jsonl"
-    try:
-        import json
-        # A newly enabled history starts with the current active candidates even
-        # if an older snapshot already existed before this feature was added.
-        previous = json.loads(previous_path.read_text()) if previous_path.exists() and history_path.exists() else None
-    except (OSError, json.JSONDecodeError):
-        previous = None
-    events = signal_transitions(previous, snapshot)
+    store = SignalStore(output)
+    events = store.record(snapshot)
+    store.export()
     write_json_atomic(output / "scanner_latest.json", snapshot)
     (output / "scanner_latest.html").write_text(render_html(snapshot))
-    append_history(history_path, events)
     confirmed = [
         row for row in rows
         if row.setup.label.endswith("CANDIDATE") and row.setup.confirmation == "CONFIRMED"
@@ -103,6 +96,15 @@ def _write_backtest(args) -> None:
                 start=1,
             )
         )
+    benchmark = assets[config.benchmark]
+    warmup = max(config.rs.min_beta_points, config.rs.persistence_window,
+                 config.rs.long_horizon_bars + config.rs.min_empirical_windows)
+    start = benchmark.intraday[0].timestamp + timedelta(seconds=(warmup + 1) * interval)
+    end = benchmark.intraday[-1].timestamp + timedelta(seconds=interval)
+    plan = calendar_plan(start, end, args.train_fraction,
+                         getattr(args, "holdout_fraction", 0.20), getattr(args, "folds", 3))
+    funding_path = getattr(args, "funding_series", None)
+    funding = load_funding_series(funding_path) if funding_path else None
     results = []
     factor_models_in_order = tuple(dict.fromkeys(
         specification.factor_model for specification in specifications
@@ -116,6 +118,7 @@ def _write_backtest(args) -> None:
             specification.event_rule for specification in model_specs
         ))
         for horizon in horizons:
+            diagnostics = {}
             events_by_rule = generate_point_in_time_event_suite(
                 assets,
                 config,
@@ -123,49 +126,25 @@ def _write_backtest(args) -> None:
                 event_rules=event_rules,
                 universe_size=args.universe,
                 factor_model=factor_model,
+                funding_cost=funding, diagnostics=diagnostics,
             )
             for specification in model_specs:
                 events = events_by_rule[specification.event_rule]
-                train, test = chronological_split(events, args.train_fraction)
                 results.append({
-                    "spec_id": specification.spec_id,
-                    "spec_label": specification.label,
-                    "event_rule": specification.event_rule,
-                    "factor_model": specification.factor_model,
-                    "horizon_bars": horizon,
-                    "horizon_seconds": horizon * interval,
-                    "event_count": len(events),
-                    "asset_return": {
-                        "all": asdict(evaluate(events, args.cost_bps)),
-                        "train": asdict(evaluate(train, args.cost_bps)),
-                        "test": asdict(evaluate(test, args.cost_bps)),
-                    },
-                    "btc_beta_adjusted_return": {
-                        "all": asdict(evaluate(
-                            events, args.cost_bps, outcome="btc_beta_adjusted"
-                        )),
-                        "train": asdict(evaluate(
-                            train, args.cost_bps, outcome="btc_beta_adjusted"
-                        )),
-                        "test": asdict(evaluate(
-                            test, args.cost_bps, outcome="btc_beta_adjusted"
-                        )),
-                    },
-                    "model_factor_adjusted_return": {
-                        "all": asdict(evaluate(
-                            events, args.cost_bps, outcome="model_factor_adjusted"
-                        )),
-                        "train": asdict(evaluate(
-                            train, args.cost_bps, outcome="model_factor_adjusted"
-                        )),
-                        "test": asdict(evaluate(
-                            test, args.cost_bps, outcome="model_factor_adjusted"
-                        )),
-                    },
-                    "events": [asdict(event) for event in events],
+                    "spec_id": specification.spec_id, "spec_label": specification.label,
+                    "event_rule": specification.event_rule, "factor_model": specification.factor_model,
+                    "horizon_bars": horizon, "horizon_seconds": horizon * interval,
+                    "coverage": diagnostics,
+                    **summarize_events(events, plan, interval, args.cost_bps,
+                                       getattr(args, "include_holdout", False)),
                 })
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
+        "source_identity": source_identity(),
+        "calendar_partitions": plan,
+        "effective_config": asdict(config),
+        "funding": str(funding_path) if funding_path else "not supplied; zero assumption",
+        "metric_contract": "Event distributions and time-block confidence intervals; no portfolio return, drawdown or Sharpe. Holdout withheld unless explicitly released.",
         "as_of": as_of.isoformat(),
         "bar_interval_seconds": interval,
         "model_version": "robust_ewma_empirical_discovery_v2",
@@ -257,6 +236,13 @@ def _add_live_flags(command) -> None:
     command.add_argument("--config", type=Path, help="strict TOML scanner configuration")
 
 
+def _add_research_flags(command):
+    command.add_argument("--holdout-fraction", type=float, default=0.20)
+    command.add_argument("--folds", type=int, default=3)
+    command.add_argument("--include-holdout", action="store_true", help="explicitly release the reserved final holdout; do not tune rules afterward")
+    command.add_argument("--funding-series", type=Path, help="timestamped funding rates with explicit coverage bounds")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Strength Tracker research scanner (no execution capability)")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -303,6 +289,14 @@ def main() -> None:
         help="round-trip fee plus spread/slippage assumption",
     )
     backtest.add_argument("--train-fraction", type=float, default=0.65)
+    _add_research_flags(backtest)
+    replay = subparsers.add_parser("replay", help="rebuild recorded archive panels and evaluate their actual transitions")
+    replay.add_argument("--archive", type=Path, required=True)
+    replay.add_argument("--output", type=Path, default=Path("output/archive_replay.json"))
+    replay.add_argument("--horizon-bars", type=int, action="append")
+    replay.add_argument("--cost-bps", type=float, default=10.0)
+    replay.add_argument("--train-fraction", type=float, default=0.65)
+    _add_research_flags(replay)
     demo = subparsers.add_parser("demo", help="run deterministic synthetic plumbing demo")
     demo.add_argument("--output", type=Path, default=Path("output"))
     demo.add_argument("--config", type=Path, help="strict TOML scanner configuration")
@@ -344,6 +338,9 @@ def main() -> None:
     elif args.command == "scan":
         as_of, interval, assets = load_fixture(args.input)
         _write_scan(args.output, as_of, assets, interval, args.config)
+    elif args.command == "replay":
+        from .archive_replay import write_replay
+        write_replay(args)
     elif args.command == "backtest":
         _write_backtest(args)
     else:

@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Mapping, Optional, Sequence
 
 from .market_structure import MarketStructureConfig, build_market_structure
 from .models import Candle, MarketContext, ScanRow, SetupAssessment
 from .relative_strength import RSConfig, compute_relative_strength
+from .validation import finite_number, positive_int
 
 
 BROAD_ALT_FACTOR = "BROAD_ALT_L1O"
@@ -23,6 +24,8 @@ class AssetInput:
     session_open: Optional[float] = None
     prior_price: Optional[float] = None
     context: Optional[MarketContext] = None
+    price_observed_at: Optional[datetime] = None
+    candles_observed_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,11 @@ class ScannerConfig:
     rs: RSConfig = RSConfig()
 
     def __post_init__(self) -> None:
+        positive_int("interval_seconds", self.interval_seconds)
+        if not isinstance(self.benchmark, str) or not self.benchmark.strip():
+            raise ValueError("benchmark must be a nonempty symbol")
+        for name in ("candidate_rs_score", "candidate_persistence", "early_discovery_score", "strong_discovery_score"):
+            finite_number(name, getattr(self, name))
         if self.interval_seconds != self.rs.bar_interval_seconds:
             raise ValueError(
                 "ScannerConfig interval_seconds must match RSConfig bar_interval_seconds"
@@ -143,6 +151,8 @@ def _row_order(row: ScanRow) -> tuple[bool, float, str]:
 
 
 def _structure_side(price: float, market) -> str:
+    if not getattr(market, "is_usable", True) or price is None:
+        return "NONE"
     if price > market.active_cpr.top and price > market.pivots.pivot:
         return "LONG"
     if price < market.active_cpr.bottom and price < market.pivots.pivot:
@@ -161,10 +171,16 @@ def assess_setup(
     confirmed_prior_price: Optional[float] = None,
 ) -> SetupAssessment:
     """Produce a research label, never an execution instruction."""
+    if not getattr(market, "is_usable", True):
+        return SetupAssessment(
+            "INSUFFICIENT_DATA", "NONE", 0.0, (), tuple(market.quality_flags),
+            confirmation_price=confirmed_price,
+        )
     if not rs.is_usable or rs.score is None or rs.persistence is None:
         return SetupAssessment(
             label="INSUFFICIENT_DATA", direction="NONE", strength=0.0,
             reasons=(), blockers=tuple(rs.quality_flags) + ((rs.reason,) if rs.reason else ()),
+            confirmation_price=confirmed_price,
         )
 
     live_side = _structure_side(price, market)
@@ -319,7 +335,7 @@ def scan_assets(
             )
             factor_name = (
                 config.rs.secondary_benchmark
-                if secondary is not None and symbol != config.rs.secondary_benchmark else None
+                if symbol != config.rs.secondary_benchmark else None
             )
         rs = compute_relative_strength(
             symbol=symbol, asset_bars=asset.intraday, benchmark=config.benchmark,
@@ -335,9 +351,13 @@ def scan_assets(
             symbol, asset.price, asset.prior_price, market, rs, config,
             confirmed_price=confirmed_price, confirmed_prior_price=confirmed_prior,
         )
+        # Discovery and neutral states still carry the verified completed
+        # close; research must never substitute the live mid for that value.
+        setup = replace(setup, confirmation_price=confirmed_price)
         rows.append(ScanRow(
             symbol=symbol, price=asset.price, market=market, rs=rs,
             setup=setup, context=asset.context,
+            input_cutoff=(asset.intraday[-1].timestamp + timedelta(seconds=config.interval_seconds) if asset.intraday else None),
         ))
 
     # Keep stale observations visible, but never let them set or move a live
@@ -351,6 +371,7 @@ def scan_assets(
             symbol=row.symbol, price=row.price, market=row.market, rs=row.rs, setup=row.setup,
             strong_rank=strength_rank.get(row.symbol), weak_rank=weakness_rank.get(row.symbol),
             context=row.context,
+            input_cutoff=row.input_cutoff,
         )
         for row in sorted(rows, key=_row_order)
     ]
